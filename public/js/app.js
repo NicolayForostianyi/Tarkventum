@@ -32,7 +32,7 @@
   }
 
   // ---------- Themes ----------
-  const THEMES = ['black', 'white', 'green', 'blue'];
+  const THEMES = ['black', 'white', 'green', 'blue', 'red', 'orange', 'yellow', 'pink', 'gold'];
   let boardReady = false;
   function applyTheme(name) {
     const theme = THEMES.includes(name) ? name : 'black';
