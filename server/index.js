@@ -1,14 +1,25 @@
 const path = require('path');
+const fs = require('fs');
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 
 const PORT = process.env.PORT || 3000;
 const MAX_CHAT = 100;
+const MAX_DM_THREAD = 500;
+const JWT_SECRET = process.env.JWT_SECRET || 'tarkventum-dev-secret-change-me';
+const JWT_EXPIRES = process.env.JWT_EXPIRES || '30d';
+const DATA_DIR = path.join(__dirname, '..', 'data');
+const USERS_FILE = path.join(DATA_DIR, 'users.json');
+const DMS_FILE = path.join(DATA_DIR, 'dms.json');
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: false } });
 
+app.use(express.json({ limit: '256kb' }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 app.get('/r/:roomId', (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
@@ -16,6 +27,11 @@ app.get('/r/:roomId', (req, res) => {
 
 /** @type {Map<string, object>} */
 const rooms = new Map();
+
+/** accountId -> Set<socketId> */
+const onlineByAccount = new Map();
+/** socketId -> accountId */
+const accountBySocket = new Map();
 
 const DEFAULT_COLUMNS = [
   { id: 'col-backlog', title: 'Бэклог', order: 0 },
@@ -29,6 +45,257 @@ const USER_COLORS = [
   '#e91e63', '#00bcd4',
 ];
 
+// ---------- Persistence ----------
+function ensureDataDir() {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+function loadJson(file, fallback) {
+  try {
+    if (!fs.existsSync(file)) return fallback;
+    const raw = fs.readFileSync(file, 'utf8');
+    return JSON.parse(raw);
+  } catch (err) {
+    console.error('loadJson', file, err.message);
+    return fallback;
+  }
+}
+
+function saveJson(file, data) {
+  ensureDataDir();
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+  fs.renameSync(tmp, file);
+}
+
+function loadUsersStore() {
+  const data = loadJson(USERS_FILE, { users: [] });
+  if (!Array.isArray(data.users)) data.users = [];
+  return data;
+}
+
+function saveUsersStore(store) {
+  saveJson(USERS_FILE, store);
+}
+
+function loadDmsStore() {
+  const data = loadJson(DMS_FILE, { threads: {}, unread: {} });
+  if (!data.threads || typeof data.threads !== 'object') data.threads = {};
+  if (!data.unread || typeof data.unread !== 'object') data.unread = {};
+  return data;
+}
+
+function saveDmsStore(store) {
+  saveJson(DMS_FILE, store);
+}
+
+ensureDataDir();
+let usersStore = loadUsersStore();
+let dmsStore = loadDmsStore();
+
+function findUserByUsername(username) {
+  const u = String(username || '').trim().toLowerCase();
+  return usersStore.users.find((x) => x.username === u) || null;
+}
+
+function findUserById(id) {
+  return usersStore.users.find((x) => x.id === id) || null;
+}
+
+function publicUser(u) {
+  return {
+    id: u.id,
+    username: u.username,
+    displayName: u.displayName || u.username,
+  };
+}
+
+function signToken(user) {
+  return jwt.sign(
+    { sub: user.id, username: user.username },
+    JWT_SECRET,
+    { expiresIn: JWT_EXPIRES }
+  );
+}
+
+function verifyToken(token) {
+  if (!token || typeof token !== 'string') return null;
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    const user = findUserById(payload.sub);
+    if (!user) return null;
+    return user;
+  } catch {
+    return null;
+  }
+}
+
+function authMiddleware(req, res, next) {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : (req.query.token || null);
+  const user = verifyToken(token);
+  if (!user) {
+    return res.status(401).json({ ok: false, error: 'Требуется вход' });
+  }
+  req.user = user;
+  next();
+}
+
+function normalizeUsername(raw) {
+  const s = String(raw || '').trim().toLowerCase();
+  if (!/^[a-z0-9_]{3,24}$/.test(s)) return null;
+  return s;
+}
+
+function threadKey(a, b) {
+  return [a, b].sort().join(':');
+}
+
+function getUnreadFor(userId, otherId) {
+  const map = dmsStore.unread[userId] || {};
+  return map[otherId] || 0;
+}
+
+function setUnread(userId, otherId, count) {
+  if (!dmsStore.unread[userId]) dmsStore.unread[userId] = {};
+  if (count <= 0) delete dmsStore.unread[userId][otherId];
+  else dmsStore.unread[userId][otherId] = count;
+}
+
+function bumpUnread(userId, otherId) {
+  setUnread(userId, otherId, getUnreadFor(userId, otherId) + 1);
+}
+
+function totalUnread(userId) {
+  const map = dmsStore.unread[userId] || {};
+  return Object.values(map).reduce((s, n) => s + (n || 0), 0);
+}
+
+function markOnline(accountId, socketId) {
+  if (!onlineByAccount.has(accountId)) onlineByAccount.set(accountId, new Set());
+  onlineByAccount.get(accountId).add(socketId);
+  accountBySocket.set(socketId, accountId);
+}
+
+function markOffline(socketId) {
+  const accountId = accountBySocket.get(socketId);
+  if (!accountId) return;
+  accountBySocket.delete(socketId);
+  const set = onlineByAccount.get(accountId);
+  if (set) {
+    set.delete(socketId);
+    if (set.size === 0) onlineByAccount.delete(accountId);
+  }
+}
+
+function isOnline(accountId) {
+  const set = onlineByAccount.get(accountId);
+  return !!(set && set.size > 0);
+}
+
+function emitToAccount(accountId, event, payload) {
+  const set = onlineByAccount.get(accountId);
+  if (!set) return;
+  for (const sid of set) {
+    io.to(sid).emit(event, payload);
+  }
+}
+
+function broadcastPresence() {
+  const onlineIds = [...onlineByAccount.keys()];
+  io.emit('users-presence', { onlineIds });
+}
+
+// ---------- Auth API ----------
+app.post('/api/register', async (req, res) => {
+  try {
+    const username = normalizeUsername(req.body?.username);
+    const password = String(req.body?.password || '');
+    const displayName = String(req.body?.displayName || username || '').trim().slice(0, 32);
+
+    if (!username) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Логин: 3–24 символа, латиница, цифры и _',
+      });
+    }
+    if (password.length < 6 || password.length > 128) {
+      return res.status(400).json({ ok: false, error: 'Пароль: от 6 до 128 символов' });
+    }
+    if (findUserByUsername(username)) {
+      return res.status(409).json({ ok: false, error: 'Такой логин уже занят' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    const user = {
+      id: genId('usr'),
+      username,
+      displayName: displayName || username,
+      passwordHash,
+      createdAt: Date.now(),
+    };
+    usersStore.users.push(user);
+    saveUsersStore(usersStore);
+
+    const token = signToken(user);
+    res.json({ ok: true, token, user: publicUser(user) });
+  } catch (err) {
+    console.error('register', err);
+    res.status(500).json({ ok: false, error: 'Ошибка сервера' });
+  }
+});
+
+app.post('/api/login', async (req, res) => {
+  try {
+    const username = normalizeUsername(req.body?.username);
+    const password = String(req.body?.password || '');
+    if (!username || !password) {
+      return res.status(400).json({ ok: false, error: 'Введите логин и пароль' });
+    }
+    const user = findUserByUsername(username);
+    if (!user) {
+      return res.status(401).json({ ok: false, error: 'Неверный логин или пароль' });
+    }
+    const ok = await bcrypt.compare(password, user.passwordHash);
+    if (!ok) {
+      return res.status(401).json({ ok: false, error: 'Неверный логин или пароль' });
+    }
+    const token = signToken(user);
+    res.json({ ok: true, token, user: publicUser(user) });
+  } catch (err) {
+    console.error('login', err);
+    res.status(500).json({ ok: false, error: 'Ошибка сервера' });
+  }
+});
+
+app.get('/api/me', authMiddleware, (req, res) => {
+  res.json({ ok: true, user: publicUser(req.user) });
+});
+
+app.get('/api/users', authMiddleware, (req, res) => {
+  const list = usersStore.users
+    .filter((u) => u.id !== req.user.id)
+    .map((u) => ({
+      ...publicUser(u),
+      online: isOnline(u.id),
+      unread: getUnreadFor(req.user.id, u.id),
+    }));
+  res.json({
+    ok: true,
+    users: list,
+    totalUnread: totalUnread(req.user.id),
+  });
+});
+
+app.get('/api/dms/:otherId', authMiddleware, (req, res) => {
+  const other = findUserById(req.params.otherId);
+  if (!other) return res.status(404).json({ ok: false, error: 'Пользователь не найден' });
+  const key = threadKey(req.user.id, other.id);
+  const messages = dmsStore.threads[key] || [];
+  res.json({ ok: true, messages, other: publicUser(other) });
+});
+
+// ---------- Rooms ----------
 function createRoom(id) {
   return {
     id,
@@ -55,6 +322,7 @@ function roomPublicState(room) {
     messages: room.messages,
     users: Array.from(room.users.values()).map((u) => ({
       id: u.id,
+      accountId: u.accountId,
       name: u.name,
       color: u.color,
       cursor: u.cursor,
@@ -88,9 +356,27 @@ function normalizeCard(card, room, fallbackColumnId) {
   };
 }
 
+// ---------- Socket auth ----------
+io.use((socket, next) => {
+  const token = socket.handshake.auth?.token || socket.handshake.query?.token;
+  const user = verifyToken(token);
+  if (!user) return next(new Error('unauthorized'));
+  socket.account = publicUser(user);
+  next();
+});
+
 io.on('connection', (socket) => {
   let currentRoom = null;
-  let userId = null;
+  let userId = null; // presence id in room (= socket.id)
+  const account = socket.account;
+
+  markOnline(account.id, socket.id);
+  broadcastPresence();
+
+  socket.emit('auth-ok', {
+    user: account,
+    totalUnread: totalUnread(account.id),
+  });
 
   function leaveCurrent() {
     if (!currentRoom || !userId) return;
@@ -108,7 +394,7 @@ io.on('connection', (socket) => {
     currentRoom = null;
   }
 
-  socket.on('join-room', ({ roomId, name }, ack) => {
+  socket.on('join-room', ({ roomId }, ack) => {
     try {
       if (!roomId || typeof roomId !== 'string') {
         if (typeof ack === 'function') ack({ ok: false, error: 'Неверный код комнаты' });
@@ -119,7 +405,7 @@ io.on('connection', (socket) => {
         if (typeof ack === 'function') ack({ ok: false, error: 'Неверный код комнаты' });
         return;
       }
-      const displayName = (name && String(name).trim().slice(0, 32)) || 'Гость';
+      const displayName = (account.displayName || account.username).slice(0, 32);
       const room = getOrCreateRoom(id);
 
       if (currentRoom && currentRoom !== id) leaveCurrent();
@@ -127,13 +413,20 @@ io.on('connection', (socket) => {
       currentRoom = id;
       userId = socket.id;
       const color = pickColor(room);
-      room.users.set(userId, { id: userId, name: displayName, color, cursor: null });
+      room.users.set(userId, {
+        id: userId,
+        accountId: account.id,
+        name: displayName,
+        color,
+        cursor: null,
+      });
       socket.join(id);
 
       if (typeof ack === 'function') {
         ack({
           ok: true,
           userId,
+          accountId: account.id,
           color,
           name: displayName,
           roomId: id,
@@ -142,6 +435,7 @@ io.on('connection', (socket) => {
       }
       socket.to(id).emit('user-joined', {
         id: userId,
+        accountId: account.id,
         name: displayName,
         color,
         cursor: null,
@@ -168,7 +462,6 @@ io.on('connection', (socket) => {
     socket.to(currentRoom).emit('cursor-move', { id: userId, cursor: user.cursor });
   });
 
-  // Objects are stored as-is (incl. roomLink: roomId, label/text, etc.)
   socket.on('object-add', (obj) => {
     if (!currentRoom || !obj || !obj.id) return;
     const room = rooms.get(currentRoom);
@@ -352,10 +645,12 @@ io.on('connection', (socket) => {
     const message = {
       id: genId('msg'),
       userId: user.id,
+      accountId: account.id,
       name: user.name,
       color: user.color,
       text: msgText,
       ts: Date.now(),
+      roomId: currentRoom,
     };
     room.messages.push(message);
     if (room.messages.length > MAX_CHAT) {
@@ -365,8 +660,100 @@ io.on('connection', (socket) => {
     if (typeof ack === 'function') ack({ ok: true, message });
   });
 
+  // ---------- DMs ----------
+  socket.on('dm-list-users', (ack) => {
+    const list = usersStore.users
+      .filter((u) => u.id !== account.id)
+      .map((u) => ({
+        ...publicUser(u),
+        online: isOnline(u.id),
+        unread: getUnreadFor(account.id, u.id),
+      }))
+      .sort((a, b) => a.username.localeCompare(b.username));
+    if (typeof ack === 'function') {
+      ack({ ok: true, users: list, totalUnread: totalUnread(account.id) });
+    }
+  });
+
+  socket.on('dm-get-thread', ({ otherId }, ack) => {
+    const other = findUserById(otherId);
+    if (!other) {
+      if (typeof ack === 'function') ack({ ok: false, error: 'Пользователь не найден' });
+      return;
+    }
+    const key = threadKey(account.id, other.id);
+    const messages = dmsStore.threads[key] || [];
+    if (typeof ack === 'function') {
+      ack({ ok: true, messages, other: publicUser(other) });
+    }
+  });
+
+  socket.on('dm-mark-read', ({ otherId }, ack) => {
+    if (!otherId) return;
+    setUnread(account.id, otherId, 0);
+    saveDmsStore(dmsStore);
+    if (typeof ack === 'function') {
+      ack({ ok: true, totalUnread: totalUnread(account.id) });
+    }
+    socket.emit('dm-unread', {
+      otherId,
+      unread: 0,
+      totalUnread: totalUnread(account.id),
+    });
+  });
+
+  socket.on('dm-send', ({ toId, text }, ack) => {
+    try {
+      const other = findUserById(toId);
+      if (!other) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Пользователь не найден' });
+        return;
+      }
+      if (other.id === account.id) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Нельзя писать себе' });
+        return;
+      }
+      const msgText = String(text || '').trim().slice(0, 1000);
+      if (!msgText) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Пустое сообщение' });
+        return;
+      }
+      const key = threadKey(account.id, other.id);
+      if (!dmsStore.threads[key]) dmsStore.threads[key] = [];
+      const message = {
+        id: genId('dm'),
+        fromId: account.id,
+        toId: other.id,
+        fromName: account.displayName || account.username,
+        text: msgText,
+        ts: Date.now(),
+      };
+      dmsStore.threads[key].push(message);
+      if (dmsStore.threads[key].length > MAX_DM_THREAD) {
+        dmsStore.threads[key] = dmsStore.threads[key].slice(-MAX_DM_THREAD);
+      }
+      bumpUnread(other.id, account.id);
+      saveDmsStore(dmsStore);
+
+      socket.emit('dm-message', message);
+      emitToAccount(other.id, 'dm-message', message);
+      emitToAccount(other.id, 'dm-unread', {
+        otherId: account.id,
+        unread: getUnreadFor(other.id, account.id),
+        totalUnread: totalUnread(other.id),
+      });
+
+      if (typeof ack === 'function') ack({ ok: true, message });
+    } catch (err) {
+      console.error('dm-send', err);
+      if (typeof ack === 'function') ack({ ok: false, error: 'Ошибка сервера' });
+    }
+  });
+
   socket.on('disconnect', () => {
     leaveCurrent();
+    markOffline(socket.id);
+    broadcastPresence();
   });
 });
 

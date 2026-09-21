@@ -7,18 +7,68 @@
   <link rel="stylesheet" href="/css/styles.css" />
 </head>
 <body>
+  <!-- Auth overlay -->
+  <div id="auth-screen" class="lobby">
+    <div class="lobby-card auth-card">
+      <div class="logo">
+        <span class="logo-mark">T</span>
+        <h1>Tarkventum</h1>
+      </div>
+      <p class="tagline">Войдите или зарегистрируйтесь, чтобы пользоваться доской и личными сообщениями</p>
+
+      <div class="auth-tabs">
+        <button type="button" class="auth-tab active" data-auth-tab="login" id="auth-tab-login">Вход</button>
+        <button type="button" class="auth-tab" data-auth-tab="register" id="auth-tab-register">Регистрация</button>
+      </div>
+
+      <form id="auth-form-login" class="auth-form">
+        <label class="field">
+          <span>Логин</span>
+          <input id="login-username" type="text" maxlength="24" placeholder="username" autocomplete="username" />
+        </label>
+        <label class="field">
+          <span>Пароль</span>
+          <input id="login-password" type="password" maxlength="128" placeholder="••••••••" autocomplete="current-password" />
+        </label>
+        <button type="submit" class="btn primary auth-submit">Войти</button>
+      </form>
+
+      <form id="auth-form-register" class="auth-form hidden">
+        <label class="field">
+          <span>Логин</span>
+          <input id="reg-username" type="text" maxlength="24" placeholder="3–24: a-z, 0-9, _" autocomplete="username" />
+        </label>
+        <label class="field">
+          <span>Отображаемое имя (необязательно)</span>
+          <input id="reg-displayname" type="text" maxlength="32" placeholder="Как вас видеть другим" autocomplete="nickname" />
+        </label>
+        <label class="field">
+          <span>Пароль</span>
+          <input id="reg-password" type="password" maxlength="128" placeholder="не менее 6 символов" autocomplete="new-password" />
+        </label>
+        <label class="field">
+          <span>Повтор пароля</span>
+          <input id="reg-password2" type="password" maxlength="128" placeholder="ещё раз" autocomplete="new-password" />
+        </label>
+        <button type="submit" class="btn primary auth-submit">Зарегистрироваться</button>
+      </form>
+
+      <p id="auth-error" class="error hidden"></p>
+      <p class="hint">Данные аккаунта хранятся на сервере (пароль — в виде хеша bcrypt)</p>
+    </div>
+  </div>
+
   <!-- Lobby -->
-  <div id="lobby" class="lobby">
+  <div id="lobby" class="lobby hidden">
     <div class="lobby-card">
       <div class="logo">
         <span class="logo-mark">T</span>
         <h1>Tarkventum</h1>
       </div>
       <p class="tagline">Совместная доска, диаграммы и Канбан в реальном времени</p>
-      <label class="field">
-        <span>Ваше имя</span>
-        <input id="name-input" type="text" maxlength="32" placeholder="Как вас зовут?" autocomplete="nickname" />
-      </label>
+      <p class="auth-user-line">Вы вошли как <strong id="lobby-username"></strong>
+        <button id="btn-logout-lobby" class="btn ghost small" type="button">Выйти из аккаунта</button>
+      </p>
       <label class="field">
         <span>Код комнаты</span>
         <input id="room-input" type="text" maxlength="32" placeholder="например: demo" autocomplete="off" />
@@ -34,7 +84,7 @@
       </label>
       <div class="lobby-actions">
         <button id="btn-create" class="btn primary" type="button">Создать комнату</button>
-        <button id="btn-join" class="btn" type="button">Войти</button>
+        <button id="btn-join" class="btn" type="button">Войти в комнату</button>
       </div>
       <p id="lobby-error" class="error hidden"></p>
       <p class="hint">Ссылка вида <code>/r/код</code> тоже открывает комнату</p>
@@ -60,14 +110,17 @@
         <button id="tab-kanban" class="tab" type="button" data-view="kanban">Канбан</button>
       </div>
       <div class="topbar-right">
+        <button id="btn-enable-notif" class="btn ghost small" type="button" title="Браузерные уведомления">🔔 Уведомления</button>
         <select id="theme-select" class="theme-select compact" title="Тема">
           <option value="black">Чёрная</option>
           <option value="white">Белая</option>
           <option value="green">Зелёная</option>
           <option value="blue">Синяя</option>
         </select>
+        <span class="user-chip" id="user-chip" title=""></span>
         <div id="presence" class="presence"></div>
-        <button id="btn-leave" class="btn ghost small" type="button">Выйти</button>
+        <button id="btn-leave" class="btn ghost small" type="button">К комнатам</button>
+        <button id="btn-logout" class="btn ghost small" type="button">Выйти</button>
       </div>
     </header>
 
@@ -165,17 +218,39 @@
         </div>
       </aside>
 
-      <!-- Chat sidebar -->
+      <!-- Chat / DM sidebar -->
       <aside class="chat-panel" id="chat-panel">
         <div class="chat-header">
-          <h2>Чат</h2>
+          <div class="side-tabs">
+            <button type="button" class="side-tab active" id="side-tab-chat" data-side="chat">Чат</button>
+            <button type="button" class="side-tab" id="side-tab-dm" data-side="dm">
+              ЛС <span id="dm-badge" class="badge hidden">0</span>
+            </button>
+          </div>
           <button id="btn-toggle-chat" class="btn ghost small" type="button" title="Свернуть">◀</button>
         </div>
-        <div id="chat-messages" class="chat-messages"></div>
-        <form id="chat-form" class="chat-form">
-          <input id="chat-input" type="text" maxlength="1000" placeholder="Написать сообщение…" autocomplete="off" />
-          <button type="submit" class="btn primary small">Отправить</button>
-        </form>
+
+        <div id="side-chat" class="side-pane">
+          <div id="chat-messages" class="chat-messages"></div>
+          <form id="chat-form" class="chat-form">
+            <input id="chat-input" type="text" maxlength="1000" placeholder="Написать в чат комнаты…" autocomplete="off" />
+            <button type="submit" class="btn primary small">Отправить</button>
+          </form>
+        </div>
+
+        <div id="side-dm" class="side-pane hidden">
+          <div class="dm-layout">
+            <div class="dm-users" id="dm-users"></div>
+            <div class="dm-thread-wrap">
+              <div class="dm-thread-head" id="dm-thread-head">Выберите собеседника</div>
+              <div id="dm-messages" class="chat-messages dm-messages"></div>
+              <form id="dm-form" class="chat-form">
+                <input id="dm-input" type="text" maxlength="1000" placeholder="Личное сообщение…" autocomplete="off" disabled />
+                <button type="submit" class="btn primary small" id="dm-send-btn" disabled>Отправить</button>
+              </form>
+            </div>
+          </div>
+        </div>
       </aside>
     </div>
   </div>

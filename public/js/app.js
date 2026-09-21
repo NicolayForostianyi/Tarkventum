@@ -46,12 +46,24 @@
   applyTheme(localStorage.getItem('tv_theme') || 'black');
 
   // ---------- State ----------
+  const TOKEN_KEY = 'tv_token';
+  const USER_KEY = 'tv_user';
+
   const state = {
     socket: null,
+    token: localStorage.getItem(TOKEN_KEY) || null,
+    account: null, // { id, username, displayName }
     userId: null,
+    accountId: null,
     userName: '',
     userColor: '#3b82f6',
     roomId: null,
+    sideMode: 'chat', // chat | dm
+    dmUsers: [],
+    dmOtherId: null,
+    dmMessages: [],
+    dmTotalUnread: 0,
+    notifPermissionAsked: false,
     view: 'canvas',
     tool: 'select',
     strokeColor: '#1f2937',
@@ -81,11 +93,12 @@
   };
 
   // ---------- DOM ----------
+  const authScreen = $('#auth-screen');
   const lobby = $('#lobby');
   const app = $('#app');
-  const nameInput = $('#name-input');
   const roomInput = $('#room-input');
   const lobbyError = $('#lobby-error');
+  const authError = $('#auth-error');
   const canvas = $('#board');
   const ctx = canvas.getContext('2d');
   const canvasWrap = $('#canvas-wrap');
@@ -101,23 +114,184 @@
   const roomLinkPanel = $('#room-link-panel');
   const cardPanel = $('#card-panel');
   const roomTabsEl = $('#room-tabs');
+  const dmUsersEl = $('#dm-users');
+  const dmMessagesEl = $('#dm-messages');
+  const dmInput = $('#dm-input');
+  const dmForm = $('#dm-form');
+  const dmThreadHead = $('#dm-thread-head');
+  const dmBadge = $('#dm-badge');
 
   const pathMatch = location.pathname.match(/^\/r\/([a-zA-Z0-9_-]+)/);
   if (pathMatch) roomInput.value = pathMatch[1];
-  const savedName = localStorage.getItem('tv_name');
-  if (savedName) nameInput.value = savedName;
-
-  nameInput.addEventListener('change', () => {
-    const n = nameInput.value.trim();
-    if (n) localStorage.setItem('tv_name', n);
-  });
-  nameInput.addEventListener('blur', () => {
-    const n = nameInput.value.trim();
-    if (n) localStorage.setItem('tv_name', n);
-  });
+  const savedLogin = localStorage.getItem('tv_login') || '';
+  if (savedLogin) $('#login-username').value = savedLogin;
 
   $('#theme-select').addEventListener('change', (e) => applyTheme(e.target.value));
   $('#theme-select-lobby').addEventListener('change', (e) => applyTheme(e.target.value));
+
+  // ---------- Auth ----------
+  function showAuthError(msg) {
+    authError.textContent = msg || '';
+    authError.classList.toggle('hidden', !msg);
+  }
+
+  function setAuthTab(tab) {
+    $$('.auth-tab').forEach((b) => b.classList.toggle('active', b.dataset.authTab === tab));
+    $('#auth-form-login').classList.toggle('hidden', tab !== 'login');
+    $('#auth-form-register').classList.toggle('hidden', tab !== 'register');
+    showAuthError('');
+  }
+  $$('.auth-tab').forEach((btn) => {
+    btn.addEventListener('click', () => setAuthTab(btn.dataset.authTab));
+  });
+
+  function saveSession(token, user) {
+    state.token = token;
+    state.account = user;
+    localStorage.setItem(TOKEN_KEY, token);
+    localStorage.setItem(USER_KEY, JSON.stringify(user));
+    localStorage.setItem('tv_login', user.username);
+  }
+
+  function clearSession() {
+    state.token = null;
+    state.account = null;
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(USER_KEY);
+    if (state.socket) {
+      state.socket.disconnect();
+      state.socket = null;
+    }
+  }
+
+  function accountDisplayName() {
+    if (!state.account) return '';
+    return (state.account.displayName || state.account.username || '').slice(0, 32);
+  }
+
+  function updateUserChrome() {
+    const name = accountDisplayName();
+    const lobbyName = $('#lobby-username');
+    if (lobbyName) lobbyName.textContent = name;
+    const chip = $('#user-chip');
+    if (chip) {
+      chip.textContent = name;
+      chip.title = state.account ? `@${state.account.username}` : '';
+    }
+  }
+
+  function showLobby() {
+    authScreen.classList.add('hidden');
+    lobby.classList.remove('hidden');
+    app.classList.add('hidden');
+    updateUserChrome();
+  }
+
+  function showAuth() {
+    authScreen.classList.remove('hidden');
+    lobby.classList.add('hidden');
+    app.classList.add('hidden');
+  }
+
+  async function api(path, opts = {}) {
+    const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+    if (state.token) headers.Authorization = `Bearer ${state.token}`;
+    const res = await fetch(path, { ...opts, headers });
+    let data = null;
+    try { data = await res.json(); } catch { data = null; }
+    return { res, data };
+  }
+
+  async function tryRestoreSession() {
+    if (!state.token) {
+      showAuth();
+      return false;
+    }
+    try {
+      const { res, data } = await api('/api/me');
+      if (!res.ok || !data || !data.ok) {
+        clearSession();
+        showAuth();
+        return false;
+      }
+      state.account = data.user;
+      localStorage.setItem(USER_KEY, JSON.stringify(data.user));
+      updateUserChrome();
+      ensureSocket();
+      showLobby();
+      return true;
+    } catch {
+      clearSession();
+      showAuth();
+      return false;
+    }
+  }
+
+  $('#auth-form-login').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    showAuthError('');
+    const username = $('#login-username').value.trim();
+    const password = $('#login-password').value;
+    if (!username || !password) return showAuthError('Введите логин и пароль');
+    try {
+      const { data } = await api('/api/login', {
+        method: 'POST',
+        body: JSON.stringify({ username, password }),
+      });
+      if (!data || !data.ok) return showAuthError((data && data.error) || 'Ошибка входа');
+      saveSession(data.token, data.user);
+      $('#login-password').value = '';
+      updateUserChrome();
+      ensureSocket();
+      showLobby();
+      maybeAutoJoinRoom();
+    } catch {
+      showAuthError('Сеть недоступна');
+    }
+  });
+
+  $('#auth-form-register').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    showAuthError('');
+    const username = $('#reg-username').value.trim();
+    const displayName = $('#reg-displayname').value.trim();
+    const password = $('#reg-password').value;
+    const password2 = $('#reg-password2').value;
+    if (password !== password2) return showAuthError('Пароли не совпадают');
+    try {
+      const { data } = await api('/api/register', {
+        method: 'POST',
+        body: JSON.stringify({ username, password, displayName }),
+      });
+      if (!data || !data.ok) return showAuthError((data && data.error) || 'Ошибка регистрации');
+      saveSession(data.token, data.user);
+      $('#reg-password').value = '';
+      $('#reg-password2').value = '';
+      updateUserChrome();
+      ensureSocket();
+      showLobby();
+      maybeAutoJoinRoom();
+      toast('Аккаунт создан');
+    } catch {
+      showAuthError('Сеть недоступна');
+    }
+  });
+
+  function logout() {
+    if (state.socket) {
+      try { state.socket.emit('leave-room'); } catch { /* ignore */ }
+    }
+    state.roomId = null;
+    state.tabs = [];
+    sessionStorage.removeItem('tv_tabs');
+    clearSession();
+    showAuth();
+    setAuthTab('login');
+    history.replaceState(null, '', '/');
+  }
+
+  $('#btn-logout').addEventListener('click', logout);
+  $('#btn-logout-lobby').addEventListener('click', logout);
 
   // ---------- Lobby ----------
   function showError(msg) {
@@ -126,23 +300,36 @@
   }
 
   function ensureSocket() {
-    if (!state.socket) {
-      state.socket = io({ transports: ['websocket', 'polling'] });
-      bindSocket(state.socket);
+    if (!state.token) return null;
+    if (state.socket && state.socket.connected) return state.socket;
+    if (state.socket) {
+      state.socket.auth = { token: state.token };
+      state.socket.connect();
+      return state.socket;
     }
+    state.socket = io({
+      transports: ['websocket', 'polling'],
+      auth: { token: state.token },
+    });
+    bindSocket(state.socket);
     return state.socket;
   }
 
   function enterRoom(roomId, { addTab = true } = {}) {
-    const name = (nameInput.value.trim() || localStorage.getItem('tv_name') || 'Гость').slice(0, 32);
-    nameInput.value = name;
-    localStorage.setItem('tv_name', name);
-    state.userName = name;
+    if (!state.account || !state.token) {
+      showAuth();
+      return;
+    }
+    state.userName = accountDisplayName();
     showError('');
     const socket = ensureSocket();
+    if (!socket) {
+      showError('Нет соединения');
+      return;
+    }
     state.joining = true;
     cancelInlineEdit(true);
-    socket.emit('join-room', { roomId, name }, (res) => {
+    socket.emit('join-room', { roomId }, (res) => {
       state.joining = false;
       if (!res || !res.ok) {
         showError((res && res.error) || 'Не удалось войти');
@@ -156,6 +343,7 @@
 
   function applyJoin(res) {
     state.userId = res.userId;
+    state.accountId = res.accountId || (state.account && state.account.id);
     state.userName = res.name;
     state.userColor = res.color;
     state.roomId = res.roomId;
@@ -177,13 +365,17 @@
     const url = `/r/${state.roomId}`;
     if (location.pathname !== url) history.replaceState(null, '', url);
 
+    authScreen.classList.add('hidden');
     lobby.classList.add('hidden');
     app.classList.remove('hidden');
     $('#room-badge').textContent = state.roomId;
+    updateUserChrome();
     renderTabs();
     renderPresence();
     renderChat();
     renderKanban();
+    refreshDmUsers();
+    updateNotifButton();
     resizeCanvas();
     draw();
     setView(state.view);
@@ -202,19 +394,15 @@
   roomInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') $('#btn-join').click();
   });
-  nameInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-      if (roomInput.value.trim()) $('#btn-join').click();
-      else $('#btn-create').click();
-    }
-  });
 
   $('#btn-leave').addEventListener('click', () => {
     if (state.socket) state.socket.emit('leave-room');
     state.roomId = null;
     state.tabs = [];
-    localStorage.removeItem('tv_tabs');
-    location.href = '/';
+    sessionStorage.removeItem('tv_tabs');
+    history.replaceState(null, '', '/');
+    app.classList.add('hidden');
+    showLobby();
   });
 
   $('#btn-copy-link').addEventListener('click', async () => {
@@ -288,7 +476,9 @@
     } else {
       if (state.socket) state.socket.emit('leave-room');
       state.roomId = null;
-      location.href = '/';
+      history.replaceState(null, '', '/');
+      app.classList.add('hidden');
+      showLobby();
     }
   }
 
@@ -509,15 +699,50 @@
         state.messages.push(msg);
         if (state.messages.length > 100) state.messages = state.messages.slice(-100);
         appendChatMessage(msg, true);
+        maybeNotifyRoomChat(msg);
+      }
+    });
+    socket.on('auth-ok', (payload) => {
+      if (payload && payload.user) {
+        state.account = payload.user;
+        updateUserChrome();
+      }
+      if (payload && typeof payload.totalUnread === 'number') {
+        state.dmTotalUnread = payload.totalUnread;
+        updateDmBadge();
+      }
+      refreshDmUsers();
+    });
+    socket.on('users-presence', ({ onlineIds }) => {
+      const set = new Set(onlineIds || []);
+      for (const u of state.dmUsers) u.online = set.has(u.id);
+      renderDmUsers();
+    });
+    socket.on('dm-message', (msg) => {
+      handleIncomingDm(msg);
+    });
+    socket.on('dm-unread', (payload) => {
+      if (!payload) return;
+      const u = state.dmUsers.find((x) => x.id === payload.otherId);
+      if (u) u.unread = payload.unread || 0;
+      if (typeof payload.totalUnread === 'number') state.dmTotalUnread = payload.totalUnread;
+      updateDmBadge();
+      renderDmUsers();
+    });
+    socket.on('connect_error', (err) => {
+      if (err && /unauthorized/i.test(String(err.message || err))) {
+        toast('Сессия истекла — войдите снова');
+        logout();
       }
     });
     socket.on('disconnect', () => toast('Соединение потеряно…'));
     socket.on('connect', () => {
       if (state.roomId) {
-        socket.emit('join-room', { roomId: state.roomId, name: state.userName }, (res) => {
+        socket.emit('join-room', { roomId: state.roomId }, (res) => {
           if (res && res.ok) applyJoin(res);
         });
       }
+      refreshDmUsers();
     });
   }
 
@@ -1905,17 +2130,281 @@
     emit('chat-message', { text });
   });
 
+  function setSideMode(mode) {
+    state.sideMode = mode;
+    $('#side-tab-chat').classList.toggle('active', mode === 'chat');
+    $('#side-tab-dm').classList.toggle('active', mode === 'dm');
+    $('#side-chat').classList.toggle('hidden', mode !== 'chat');
+    $('#side-dm').classList.toggle('hidden', mode !== 'dm');
+    if (mode === 'dm') {
+      refreshDmUsers();
+      if (state.dmOtherId) openDmThread(state.dmOtherId);
+    }
+  }
+  $('#side-tab-chat').addEventListener('click', () => setSideMode('chat'));
+  $('#side-tab-dm').addEventListener('click', () => setSideMode('dm'));
+
   $('#btn-toggle-chat').addEventListener('click', () => {
     chatPanel.classList.toggle('collapsed');
     $('#btn-toggle-chat').textContent = chatPanel.classList.contains('collapsed') ? '▶' : '◀';
     resizeCanvas();
   });
 
-  // Auto-join if path has room and name saved
-  if (pathMatch && savedName) {
-    upsertTab(pathMatch[1].toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 32) || pathMatch[1]);
-    setTimeout(() => enterRoom(pathMatch[1]), 50);
-  } else if (pathMatch) {
-    // prefill only — user enters name
+  // ---------- DMs ----------
+  function updateDmBadge() {
+    const n = state.dmTotalUnread || 0;
+    if (n > 0) {
+      dmBadge.textContent = n > 99 ? '99+' : String(n);
+      dmBadge.classList.remove('hidden');
+    } else {
+      dmBadge.classList.add('hidden');
+    }
   }
+
+  function refreshDmUsers() {
+    if (!state.socket || !state.socket.connected) return;
+    state.socket.emit('dm-list-users', (res) => {
+      if (!res || !res.ok) return;
+      state.dmUsers = res.users || [];
+      state.dmTotalUnread = res.totalUnread || 0;
+      updateDmBadge();
+      renderDmUsers();
+    });
+  }
+
+  function renderDmUsers() {
+    dmUsersEl.innerHTML = '';
+    if (!state.dmUsers.length) {
+      const empty = document.createElement('div');
+      empty.className = 'dm-thread-head';
+      empty.textContent = 'Пока нет других пользователей';
+      dmUsersEl.appendChild(empty);
+      return;
+    }
+    for (const u of state.dmUsers) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'dm-user' + (u.id === state.dmOtherId ? ' active' : '');
+      const label = escapeHtml(u.displayName || u.username);
+      const unread = u.unread > 0
+        ? `<span class="dm-user-unread">${u.unread > 99 ? '99+' : u.unread}</span>`
+        : '';
+      btn.innerHTML = `
+        <span class="dm-user-dot${u.online ? ' online' : ''}" title="${u.online ? 'в сети' : 'не в сети'}"></span>
+        <span class="dm-user-name">${label}</span>
+        ${unread}
+      `;
+      btn.addEventListener('click', () => openDmThread(u.id));
+      dmUsersEl.appendChild(btn);
+    }
+  }
+
+  function openDmThread(otherId) {
+    state.dmOtherId = otherId;
+    const u = state.dmUsers.find((x) => x.id === otherId);
+    dmThreadHead.textContent = u
+      ? `ЛС: ${u.displayName || u.username}`
+      : 'Личные сообщения';
+    dmInput.disabled = false;
+    $('#dm-send-btn').disabled = false;
+    renderDmUsers();
+    state.socket.emit('dm-get-thread', { otherId }, (res) => {
+      if (!res || !res.ok) return;
+      state.dmMessages = res.messages || [];
+      renderDmMessages();
+    });
+    state.socket.emit('dm-mark-read', { otherId }, (res) => {
+      if (res && res.ok) {
+        const uu = state.dmUsers.find((x) => x.id === otherId);
+        if (uu) uu.unread = 0;
+        if (typeof res.totalUnread === 'number') state.dmTotalUnread = res.totalUnread;
+        updateDmBadge();
+        renderDmUsers();
+      }
+    });
+  }
+
+  function renderDmMessages() {
+    dmMessagesEl.innerHTML = '';
+    for (const msg of state.dmMessages) appendDmMessage(msg, false);
+    dmMessagesEl.scrollTop = dmMessagesEl.scrollHeight;
+  }
+
+  function appendDmMessage(msg, scroll) {
+    const mine = state.account && msg.fromId === state.account.id;
+    const name = mine
+      ? 'Вы'
+      : (msg.fromName || (state.dmUsers.find((u) => u.id === msg.fromId) || {}).displayName || '…');
+    const el = document.createElement('div');
+    el.className = 'chat-msg' + (mine ? ' mine' : '');
+    el.innerHTML = `
+      <div class="chat-msg-meta">
+        <span class="chat-msg-name" style="color:${mine ? state.userColor : '#93c5fd'}">${escapeHtml(name)}</span>
+        <span class="chat-msg-time">${formatTime(msg.ts)}</span>
+      </div>
+      <div class="chat-msg-text">${escapeHtml(msg.text)}</div>
+    `;
+    dmMessagesEl.appendChild(el);
+    if (scroll) dmMessagesEl.scrollTop = dmMessagesEl.scrollHeight;
+  }
+
+  function handleIncomingDm(msg) {
+    if (!msg || !msg.id) return;
+    const otherId = state.account && msg.fromId === state.account.id ? msg.toId : msg.fromId;
+    const viewing = state.sideMode === 'dm' && state.dmOtherId === otherId && !document.hidden;
+    if (state.dmOtherId === otherId) {
+      if (!state.dmMessages.find((m) => m.id === msg.id)) {
+        state.dmMessages.push(msg);
+        appendDmMessage(msg, true);
+      }
+      if (viewing && state.socket) {
+        state.socket.emit('dm-mark-read', { otherId });
+      }
+    }
+    // refresh list counts from server events; still bump locally if from other
+    if (!viewing && state.account && msg.fromId !== state.account.id) {
+      const u = state.dmUsers.find((x) => x.id === msg.fromId);
+      if (u) u.unread = (u.unread || 0) + 1;
+      state.dmTotalUnread = (state.dmTotalUnread || 0) + 1;
+      updateDmBadge();
+      renderDmUsers();
+      maybeNotifyDm(msg);
+    } else if (state.account && msg.fromId !== state.account.id) {
+      // focused thread — no notify
+    } else if (document.hidden && state.account && msg.fromId !== state.account.id) {
+      maybeNotifyDm(msg);
+    }
+    refreshDmUsers();
+  }
+
+  dmForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const text = dmInput.value.trim();
+    if (!text || !state.dmOtherId) return;
+    dmInput.value = '';
+    emit('dm-send', { toId: state.dmOtherId, text }, (res) => {
+      if (res && !res.ok) toast(res.error || 'Не удалось отправить');
+    });
+  });
+
+  // ---------- Browser notifications ----------
+  function notifSupported() {
+    return typeof Notification !== 'undefined';
+  }
+
+  function updateNotifButton() {
+    const btn = $('#btn-enable-notif');
+    if (!btn) return;
+    if (!notifSupported()) {
+      btn.textContent = '🔔 Недоступно';
+      btn.disabled = true;
+      return;
+    }
+    const p = Notification.permission;
+    if (p === 'granted') btn.textContent = '🔔 Вкл.';
+    else if (p === 'denied') btn.textContent = '🔔 Запрещены';
+    else btn.textContent = '🔔 Уведомления';
+  }
+
+  async function requestNotifPermission() {
+    if (!notifSupported()) {
+      toast('Уведомления не поддерживаются');
+      return false;
+    }
+    if (Notification.permission === 'granted') return true;
+    if (Notification.permission === 'denied') {
+      toast('Разрешите уведомления в настройках браузера');
+      updateNotifButton();
+      return false;
+    }
+    try {
+      const res = await Notification.requestPermission();
+      updateNotifButton();
+      if (res === 'granted') {
+        toast('Уведомления включены');
+        return true;
+      }
+      toast('Уведомления не разрешены');
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  $('#btn-enable-notif').addEventListener('click', () => {
+    requestNotifPermission();
+  });
+
+  function showBrowserNotification(title, body, data) {
+    if (!notifSupported() || Notification.permission !== 'granted') return;
+    try {
+      const n = new Notification(title, {
+        body: String(body || '').slice(0, 120),
+        tag: (data && data.tag) || undefined,
+      });
+      n.onclick = () => {
+        try { window.focus(); } catch { /* ignore */ }
+        if (data && data.type === 'dm' && data.otherId) {
+          setSideMode('dm');
+          openDmThread(data.otherId);
+          chatPanel.classList.remove('collapsed');
+        } else if (data && data.type === 'chat') {
+          setSideMode('chat');
+          chatPanel.classList.remove('collapsed');
+        }
+        n.close();
+      };
+    } catch { /* ignore */ }
+  }
+
+  function maybeNotifyRoomChat(msg) {
+    if (!msg) return;
+    if (state.account && msg.accountId === state.account.id) return;
+    if (state.userId && msg.userId === state.userId) return;
+    const chatFocused = state.sideMode === 'chat' && !chatPanel.classList.contains('collapsed') && !document.hidden;
+    if (chatFocused) return;
+    if (Notification.permission === 'default' && !state.notifPermissionAsked) {
+      state.notifPermissionAsked = true;
+      // soft: do not auto-prompt; wait for button
+    }
+    if (Notification.permission !== 'granted') return;
+    const room = msg.roomId || state.roomId || 'комната';
+    showBrowserNotification(
+      `Чат · ${room}`,
+      `${msg.name || 'Участник'}: ${msg.text}`,
+      { type: 'chat', roomId: room, tag: `chat-${msg.id}` }
+    );
+  }
+
+  function maybeNotifyDm(msg) {
+    if (!msg || !state.account) return;
+    if (msg.fromId === state.account.id) return;
+    const threadOpen = state.sideMode === 'dm' && state.dmOtherId === msg.fromId && !document.hidden
+      && !chatPanel.classList.contains('collapsed');
+    if (threadOpen) return;
+    if (Notification.permission !== 'granted') return;
+    showBrowserNotification(
+      `ЛС · ${msg.fromName || 'Сообщение'}`,
+      msg.text,
+      { type: 'dm', otherId: msg.fromId, tag: `dm-${msg.id}` }
+    );
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && state.sideMode === 'dm' && state.dmOtherId) {
+      emit('dm-mark-read', { otherId: state.dmOtherId });
+    }
+  });
+
+  function maybeAutoJoinRoom() {
+    if (!pathMatch || !state.account) return;
+    const code = pathMatch[1].toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 32) || pathMatch[1];
+    upsertTab(code);
+    setTimeout(() => enterRoom(pathMatch[1]), 50);
+  }
+
+  updateNotifButton();
+  tryRestoreSession().then((ok) => {
+    if (ok) maybeAutoJoinRoom();
+  });
 })();
