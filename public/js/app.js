@@ -83,6 +83,7 @@
     drawing: null,
     dragging: null,
     resizing: null,
+    marquee: null, // { x1,y1,x2,y2, additive }
     panning: false,
     spaceDown: false,
     lastCursorSent: 0,
@@ -1236,6 +1237,79 @@
     return null;
   }
 
+
+  function rectsIntersect(a, b) {
+    return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+  }
+
+  function pointInRect(px, py, r) {
+    return px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h;
+  }
+
+  function segmentIntersectsRect(x1, y1, x2, y2, r) {
+    if (pointInRect(x1, y1, r) || pointInRect(x2, y2, r)) return true;
+    // Liang-Barsky / edge checks via bbox of segment vs rect already partial;
+    // also test if segment crosses any edge of the rect
+    const edges = [
+      [r.x, r.y, r.x + r.w, r.y],
+      [r.x, r.y + r.h, r.x + r.w, r.y + r.h],
+      [r.x, r.y, r.x, r.y + r.h],
+      [r.x + r.w, r.y, r.x + r.w, r.y + r.h],
+    ];
+    const orient = (ax, ay, bx, by, cx, cy) => (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+    const onSeg = (ax, ay, bx, by, cx, cy) => (
+      Math.min(ax, bx) <= cx && cx <= Math.max(ax, bx) &&
+      Math.min(ay, by) <= cy && cy <= Math.max(ay, by)
+    );
+    const crosses = (ax, ay, bx, by, cx, cy, dx, dy) => {
+      const o1 = orient(ax, ay, bx, by, cx, cy);
+      const o2 = orient(ax, ay, bx, by, dx, dy);
+      const o3 = orient(cx, cy, dx, dy, ax, ay);
+      const o4 = orient(cx, cy, dx, dy, bx, by);
+      if (o1 === 0 && onSeg(ax, ay, bx, by, cx, cy)) return true;
+      if (o2 === 0 && onSeg(ax, ay, bx, by, dx, dy)) return true;
+      if (o3 === 0 && onSeg(cx, cy, dx, dy, ax, ay)) return true;
+      if (o4 === 0 && onSeg(cx, cy, dx, dy, bx, by)) return true;
+      return (o1 > 0) !== (o2 > 0) && (o3 > 0) !== (o4 > 0);
+    };
+    for (const [ex1, ey1, ex2, ey2] of edges) {
+      if (crosses(x1, y1, x2, y2, ex1, ey1, ex2, ey2)) return true;
+    }
+    return false;
+  }
+
+  function applyMarqueeSelection(m) {
+    const r = {
+      x: Math.min(m.x1, m.x2),
+      y: Math.min(m.y1, m.y2),
+      w: Math.abs(m.x2 - m.x1),
+      h: Math.abs(m.y2 - m.y1),
+    };
+    if (r.w < 2 && r.h < 2) {
+      // tiny drag = click: clear unless additive
+      if (!m.additive) {
+        state.selectedIds.clear();
+        state.selectedConnectorIds.clear();
+      }
+      return;
+    }
+    if (!m.additive) {
+      state.selectedIds.clear();
+      state.selectedConnectorIds.clear();
+    }
+    for (const obj of state.objects) {
+      const b = boundsOf(obj);
+      if (b && rectsIntersect(b, r)) state.selectedIds.add(obj.id);
+    }
+    for (const conn of state.connectors) {
+      const ep = connectorEndpoints(conn);
+      if (!ep) continue;
+      if (segmentIntersectsRect(ep.x1, ep.y1, ep.x2, ep.y2, r)) {
+        state.selectedConnectorIds.add(conn.id);
+      }
+    }
+  }
+
   function hitTest(wx, wy) {
     for (let i = state.objects.length - 1; i >= 0; i--) {
       const obj = state.objects[i];
@@ -1325,6 +1399,21 @@
         ctx.stroke();
         ctx.restore();
       }
+    }
+    if (state.marquee) {
+      const m = state.marquee;
+      const x = Math.min(m.x1, m.x2);
+      const y = Math.min(m.y1, m.y2);
+      const w = Math.abs(m.x2 - m.x1);
+      const h = Math.abs(m.y2 - m.y1);
+      ctx.save();
+      ctx.fillStyle = 'rgba(59,130,246,0.12)';
+      ctx.strokeStyle = '#3b82f6';
+      ctx.lineWidth = 1 / state.camera.scale;
+      ctx.setLineDash([6 / state.camera.scale, 4 / state.camera.scale]);
+      ctx.fillRect(x, y, w, h);
+      ctx.strokeRect(x, y, w, h);
+      ctx.restore();
     }
     ctx.restore();
     updateZoomLabel();
@@ -1620,6 +1709,9 @@
   canvasWrap.addEventListener('mousedown', (e) => {
     if (e.button === 1) e.preventDefault();
   });
+  canvasWrap.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+  });
 
   canvasWrap.addEventListener('wheel', (e) => {
     e.preventDefault();
@@ -1704,6 +1796,25 @@
     }
 
     if (state.tool === 'select') {
+      // Right mouse: rectangular marquee selection
+      if (e.button === 2) {
+        e.preventDefault();
+        try { canvasWrap.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+        state.marquee = {
+          x1: world.x,
+          y1: world.y,
+          x2: world.x,
+          y2: world.y,
+          additive: !!e.shiftKey,
+        };
+        if (!e.shiftKey) {
+          state.selectedIds.clear();
+          state.selectedConnectorIds.clear();
+        }
+        draw();
+        return;
+      }
+
       // resize?
       if (state.selectedIds.size === 1) {
         const sel = state.objects.find((o) => o.id === [...state.selectedIds][0]);
@@ -1885,6 +1996,13 @@
       return;
     }
 
+    if (state.marquee) {
+      state.marquee.x2 = world.x;
+      state.marquee.y2 = world.y;
+      draw();
+      return;
+    }
+
     if (state.resizing) {
       const obj = state.objects.find((o) => o.id === state.resizing.id);
       const orig = state.resizing.orig;
@@ -1986,6 +2104,11 @@
 
   canvasWrap.addEventListener('pointerup', () => {
     flushPendingInlineEdit();
+    if (state.marquee) {
+      applyMarqueeSelection(state.marquee);
+      state.marquee = null;
+      draw();
+    }
     if (state.panning) {
       state.panning = false;
       setTool(state.tool);
