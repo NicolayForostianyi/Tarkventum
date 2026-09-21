@@ -168,6 +168,7 @@ io.on('connection', (socket) => {
     socket.to(currentRoom).emit('cursor-move', { id: userId, cursor: user.cursor });
   });
 
+  // Objects are stored as-is (incl. roomLink: roomId, label/text, etc.)
   socket.on('object-add', (obj) => {
     if (!currentRoom || !obj || !obj.id) return;
     const room = rooms.get(currentRoom);

@@ -289,6 +289,23 @@ button { cursor: pointer; }
   background: var(--sticky); color: #1f2937; border-color: #ca8a04;
 }
 
+.room-link-panel {
+  position: absolute; z-index: 6; left: 12px; top: 12px;
+  width: min(280px, calc(100% - 24px));
+  background: var(--bg-elev); border: 1px solid var(--border);
+  border-radius: 12px; padding: 12px 14px; box-shadow: var(--shadow);
+}
+.room-link-panel-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px; gap: 8px;
+}
+.room-link-panel-head strong { font-size: .9rem; }
+.room-link-panel .field { margin-bottom: 10px; }
+.room-link-panel .field:last-of-type { margin-bottom: 4px; }
+.room-link-hint {
+  margin: 10px 0 0; font-size: .72rem; color: var(--muted); line-height: 1.35;
+}
+
 /* Kanban — full viewport under chrome */
 .view-kanban {
   display: flex; flex-direction: column;

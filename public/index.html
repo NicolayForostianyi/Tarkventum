@@ -93,6 +93,7 @@
             <button class="tool" data-tool="arrow" title="Стрелка (A)" type="button">→</button>
             <button class="tool" data-tool="sticky" title="Стикер (S)" type="button">🗒</button>
             <button class="tool" data-tool="text" title="Текст (T)" type="button">T</button>
+            <button class="tool" data-tool="roomLink" title="Ссылка на комнату" type="button">↗</button>
             <div class="tool-sep"></div>
             <label class="color-pick" title="Цвет">
               <input id="stroke-color" type="color" value="#1f2937" />
@@ -103,6 +104,26 @@
             <canvas id="board"></canvas>
             <div id="cursors" class="cursors"></div>
             <div id="inline-edit" class="inline-edit hidden" contenteditable="true" spellcheck="false"></div>
+            <div id="room-link-panel" class="room-link-panel hidden">
+              <div class="room-link-panel-head">
+                <strong>Ссылка на комнату</strong>
+                <button id="room-link-panel-close" class="btn ghost small" type="button" title="Закрыть">✕</button>
+              </div>
+              <label class="field">
+                <span>Код комнаты</span>
+                <input id="room-link-id" type="text" maxlength="32" placeholder="например: demo" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>Заголовок (необязательно)</span>
+                <input id="room-link-label" type="text" maxlength="80" placeholder="Название ссылки" autocomplete="off" />
+              </label>
+              <div class="modal-actions">
+                <button id="room-link-open" class="btn" type="button">Открыть</button>
+                <div class="spacer"></div>
+                <button id="room-link-save" class="btn primary" type="button">Сохранить</button>
+              </div>
+              <p class="room-link-hint">Двойной клик по фигуре — открыть комнату. Alt+двойной клик — изменить.</p>
+            </div>
             <div id="zoom-label" class="zoom-label">100%</div>
             <div id="connector-hint" class="connector-hint hidden">Выберите фигуру-источник, затем фигуру-цель</div>
           </div>

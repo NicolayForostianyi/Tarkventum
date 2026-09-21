@@ -75,6 +75,7 @@
     editingCardId: null,
     connectorFromId: null,
     inlineEdit: null,
+    editingRoomLinkId: null,
     tabs: [], // { roomId }
     joining: false,
   };
@@ -97,6 +98,7 @@
   const kanbanBoard = $('#kanban-board');
   const inlineEditEl = $('#inline-edit');
   const connectorHint = $('#connector-hint');
+  const roomLinkPanel = $('#room-link-panel');
   const cardPanel = $('#card-panel');
   const roomTabsEl = $('#room-tabs');
 
@@ -170,6 +172,7 @@
     state.connectorFromId = null;
     connectorHint.classList.add('hidden');
     closeCardPanel();
+    closeRoomLinkPanel();
 
     const url = `/r/${state.roomId}`;
     if (location.pathname !== url) history.replaceState(null, '', url);
@@ -351,6 +354,7 @@
   function isTypingTarget(el) {
     if (!el) return false;
     if (el === inlineEditEl || inlineEditEl.contains(el)) return true;
+    if (roomLinkPanel && (el === roomLinkPanel || roomLinkPanel.contains(el))) return true;
     const tag = el.tagName;
     return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
   }
@@ -378,11 +382,22 @@
       deleteSelected();
     }
     if (e.key === 'Escape') {
+      if (!roomLinkPanel.classList.contains('hidden')) {
+        closeRoomLinkPanel();
+        return;
+      }
       state.connectorFromId = null;
       state.selectedIds.clear();
       state.selectedConnectorIds.clear();
       if (state.tool === 'connector') connectorHint.textContent = 'Выберите фигуру-источник, затем фигуру-цель';
       draw();
+    }
+    if (e.key === 'Enter' && state.view === 'canvas' && state.selectedIds.size === 1) {
+      const sel = state.objects.find((o) => o.id === [...state.selectedIds][0]);
+      if (sel && sel.type === 'roomLink') {
+        e.preventDefault();
+        openRoomLinkPanel(sel);
+      }
     }
   });
   window.addEventListener('keyup', (e) => {
@@ -555,7 +570,7 @@
   }
 
   // ---------- Geometry helpers ----------
-  const SHAPE_TYPES = new Set(['rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event', 'sticky']);
+  const SHAPE_TYPES = new Set(['rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event', 'sticky', 'roomLink']);
 
   function centerOf(obj) {
     const b = boundsOf(obj);
@@ -758,6 +773,51 @@
       ctx.lineTo(obj.x2, obj.y2);
       ctx.stroke();
       if (obj.type === 'arrow') drawArrowHead(obj.x1, obj.y1, obj.x2, obj.y2, obj.stroke || '#1f2937');
+    } else if (obj.type === 'roomLink') {
+      const x = Math.min(obj.x, obj.x + obj.w);
+      const y = Math.min(obj.y, obj.y + obj.h);
+      const w = Math.abs(obj.w) || 180;
+      const h = Math.abs(obj.h) || 72;
+      const primary = getComputedStyle(document.documentElement).getPropertyValue('--primary').trim() || '#3b82f6';
+      const textCol = getComputedStyle(document.documentElement).getPropertyValue('--text').trim() || '#e8eef7';
+      const muted = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#8b9bb4';
+      ctx.fillStyle = obj.fill || 'rgba(59,130,246,0.14)';
+      ctx.strokeStyle = obj.stroke || primary;
+      ctx.lineWidth = obj.strokeWidth || 2;
+      drawRoundedRect(x, y, w, h, 14);
+      ctx.fill();
+      ctx.stroke();
+      // badge
+      const badgeH = Math.min(22, h * 0.32);
+      const badgeW = Math.min(88, w * 0.45);
+      ctx.fillStyle = primary;
+      drawRoundedRect(x + 10, y + 10, badgeW, badgeH, 6);
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.font = `600 ${Math.max(10, Math.min(11, badgeH - 6))}px Segoe UI, system-ui, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('→ комната', x + 10 + badgeW / 2, y + 10 + badgeH / 2);
+      // title + room id
+      const title = roomLinkTitle(obj);
+      const rid = normalizeRoomCode(obj.roomId);
+      ctx.textAlign = 'left';
+      ctx.fillStyle = textCol;
+      ctx.font = `600 ${Math.max(12, Math.min(14, h * 0.2))}px Segoe UI, system-ui, sans-serif`;
+      const titleY = y + 10 + badgeH + 16;
+      const maxTitleW = w - 20;
+      let drawnTitle = title;
+      while (drawnTitle.length > 1 && ctx.measureText(drawnTitle).width > maxTitleW) {
+        drawnTitle = drawnTitle.slice(0, -1);
+      }
+      if (drawnTitle !== title && drawnTitle.length > 1) drawnTitle = drawnTitle.slice(0, -1) + '…';
+      ctx.fillText(drawnTitle, x + 10, titleY);
+      ctx.fillStyle = muted;
+      ctx.font = `${Math.max(11, Math.min(12, h * 0.16))}px Segoe UI, system-ui, sans-serif`;
+      const sub = rid ? `комната: ${rid}` : 'код не задан';
+      ctx.fillText(sub, x + 10, titleY + 16);
+      ctx.textAlign = 'start';
+      ctx.textBaseline = 'alphabetic';
     } else if (obj.type === 'sticky') {
       const w = obj.w || 160;
       const h = obj.h || 120;
@@ -1040,6 +1100,69 @@
     return obj;
   }
 
+
+  function normalizeRoomCode(code) {
+    return String(code || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 32);
+  }
+
+  function roomLinkTitle(obj) {
+    const label = (obj.label || obj.text || '').trim();
+    if (label) return label;
+    const rid = normalizeRoomCode(obj.roomId);
+    return rid ? `→ ${rid}` : 'Ссылка на комнату';
+  }
+
+  function openRoomLinkPanel(obj) {
+    if (!obj || obj.type !== 'roomLink') return;
+    cancelInlineEdit(true);
+    state.editingRoomLinkId = obj.id;
+    $('#room-link-id').value = obj.roomId || '';
+    $('#room-link-label').value = obj.label || obj.text || '';
+    roomLinkPanel.classList.remove('hidden');
+    const idInput = $('#room-link-id');
+    idInput.focus();
+    idInput.select();
+  }
+
+  function closeRoomLinkPanel() {
+    state.editingRoomLinkId = null;
+    roomLinkPanel.classList.add('hidden');
+  }
+
+  function saveRoomLinkPanel() {
+    if (!state.editingRoomLinkId) return null;
+    const obj = state.objects.find((o) => o.id === state.editingRoomLinkId);
+    if (!obj) {
+      closeRoomLinkPanel();
+      return null;
+    }
+    const roomId = normalizeRoomCode($('#room-link-id').value);
+    const label = String($('#room-link-label').value || '').trim().slice(0, 80);
+    obj.roomId = roomId;
+    obj.label = label;
+    obj.text = label;
+    emit('object-update', obj);
+    draw();
+    return obj;
+  }
+
+  function navigateRoomLink(obj) {
+    if (!obj || obj.type !== 'roomLink') return;
+    const roomId = normalizeRoomCode(obj.roomId);
+    if (!roomId) {
+      openRoomLinkPanel(obj);
+      toast('Укажите код комнаты');
+      return;
+    }
+    if (roomId === state.roomId) {
+      toast('Уже в этой комнате');
+      return;
+    }
+    closeRoomLinkPanel();
+    upsertTab(roomId);
+    enterRoom(roomId, { addTab: true });
+  }
+
   // ---------- Inline edit ----------
   function startInlineEdit(obj) {
     if (!obj) return;
@@ -1122,6 +1245,41 @@
     if (state.inlineEdit) commitInlineEdit();
   });
 
+  $('#room-link-panel-close').addEventListener('click', () => {
+    saveRoomLinkPanel();
+    closeRoomLinkPanel();
+  });
+  $('#room-link-save').addEventListener('click', () => {
+    const obj = saveRoomLinkPanel();
+    closeRoomLinkPanel();
+    if (obj && !obj.roomId) toast('Код комнаты пуст — укажите позже');
+    else toast('Ссылка сохранена');
+  });
+  $('#room-link-open').addEventListener('click', () => {
+    const obj = saveRoomLinkPanel();
+    if (obj) navigateRoomLink(obj);
+  });
+  $('#room-link-id').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      $('#room-link-save').click();
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeRoomLinkPanel();
+    }
+  });
+  $('#room-link-label').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      $('#room-link-save').click();
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeRoomLinkPanel();
+    }
+  });
+
   // ---------- Pointer handlers ----------
   canvasWrap.addEventListener('wheel', (e) => {
     e.preventDefault();
@@ -1140,7 +1298,12 @@
   canvasWrap.addEventListener('pointerdown', (e) => {
     if (state.view !== 'canvas') return;
     if (e.target === inlineEditEl) return;
+    if (roomLinkPanel.contains(e.target)) return;
     if (state.inlineEdit) commitInlineEdit();
+    if (!roomLinkPanel.classList.contains('hidden') && state.editingRoomLinkId) {
+      saveRoomLinkPanel();
+      closeRoomLinkPanel();
+    }
 
     canvasWrap.setPointerCapture(e.pointerId);
     const pt = getLocalPoint(e);
@@ -1156,12 +1319,10 @@
 
     if (state.tool === 'connector') {
       const hit = hitTest(world.x, world.y);
-      if (!hit || !SHAPE_TYPES.has(hit.type) && hit.type !== 'text') {
-        // allow connecting shapes only
-        if (!hit || hit.type === 'pen' || hit.type === 'line' || hit.type === 'arrow') {
-          toast('Кликните по фигуре');
-          return;
-        }
+      const canConnect = hit && (SHAPE_TYPES.has(hit.type) || hit.type === 'text');
+      if (!canConnect) {
+        toast('Кликните по фигуре');
+        return;
       }
       if (!state.connectorFromId) {
         state.connectorFromId = hit.id;
@@ -1218,7 +1379,12 @@
 
       const now = Date.now();
       if (hit && lastClick.id === hit.id && now - lastClick.time < 350) {
-        startInlineEdit(hit);
+        if (hit.type === 'roomLink') {
+          if (e.altKey) openRoomLinkPanel(hit);
+          else navigateRoomLink(hit);
+        } else {
+          startInlineEdit(hit);
+        }
         lastClick = { time: 0, id: null };
         return;
       }
@@ -1290,6 +1456,30 @@
         stroke: state.strokeColor,
         strokeWidth: 2,
       };
+      return;
+    }
+
+    if (state.tool === 'roomLink') {
+      const obj = {
+        id: uid('obj'),
+        type: 'roomLink',
+        x: world.x - 90,
+        y: world.y - 36,
+        w: 180,
+        h: 72,
+        stroke: state.strokeColor,
+        fill: 'rgba(59,130,246,0.14)',
+        strokeWidth: 2,
+        roomId: '',
+        label: '',
+        text: '',
+      };
+      state.objects.push(obj);
+      emit('object-add', obj);
+      state.selectedIds = new Set([obj.id]);
+      setTool('select');
+      draw();
+      openRoomLinkPanel(obj);
       return;
     }
 
