@@ -5,3 +5,5 @@ npm-debug.log*
 *.log
 .idea/
 .vscode/
+data/
+!data/.gitkeep
