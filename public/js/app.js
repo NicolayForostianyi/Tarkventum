@@ -541,9 +541,54 @@
   $$('.tool[data-tool]').forEach((btn) => {
     btn.addEventListener('click', () => setTool(btn.dataset.tool));
   });
-  $('#stroke-color').addEventListener('input', (e) => {
-    state.strokeColor = e.target.value;
+  function syncColorUI(color) {
+    const stroke = $('#stroke-color');
+    const palette = $('#palette-color');
+    if (stroke) stroke.value = color;
+    if (palette) palette.value = color;
+    $$('#color-palette .swatch[data-color]').forEach((b) => {
+      b.classList.toggle('active', b.dataset.color.toLowerCase() === color.toLowerCase());
+    });
+  }
+
+  function setStrokeColor(color, { applyToSelection = true } = {}) {
+    if (!color) return;
+    state.strokeColor = color;
+    syncColorUI(color);
+    if (!applyToSelection) return;
+    let changed = false;
+    for (const id of state.selectedIds) {
+      const obj = state.objects.find((o) => o.id === id);
+      if (!obj) continue;
+      if (obj.type === 'sticky') {
+        obj.fill = color;
+      } else if (obj.type === 'text') {
+        obj.stroke = color;
+      } else if ('stroke' in obj) {
+        obj.stroke = color;
+      }
+      emit('object-update', obj);
+      changed = true;
+    }
+    for (const id of state.selectedConnectorIds) {
+      const conn = state.connectors.find((c) => c.id === id);
+      if (!conn) continue;
+      conn.stroke = color;
+      emit('connector-update', conn);
+      changed = true;
+    }
+    if (changed) draw();
+  }
+
+  $('#stroke-color').addEventListener('input', (e) => setStrokeColor(e.target.value));
+  const paletteColor = $('#palette-color');
+  if (paletteColor) {
+    paletteColor.addEventListener('input', (e) => setStrokeColor(e.target.value));
+  }
+  $$('#color-palette .swatch[data-color]').forEach((btn) => {
+    btn.addEventListener('click', () => setStrokeColor(btn.dataset.color));
   });
+  syncColorUI(state.strokeColor);
   $('#btn-delete').addEventListener('click', deleteSelected);
 
   function isTypingTarget(el) {
@@ -1567,6 +1612,15 @@
   });
 
   // ---------- Pointer handlers ----------
+
+  // Middle mouse button: pan the canvas (block browser autoscroll)
+  canvasWrap.addEventListener('auxclick', (e) => {
+    if (e.button === 1) e.preventDefault();
+  });
+  canvasWrap.addEventListener('mousedown', (e) => {
+    if (e.button === 1) e.preventDefault();
+  });
+
   canvasWrap.addEventListener('wheel', (e) => {
     e.preventDefault();
     const pt = getLocalPoint(e);
@@ -1585,6 +1639,8 @@
     if (state.view !== 'canvas') return;
     if (e.target === inlineEditEl || inlineEditEl.contains(e.target)) return;
     if (roomLinkPanel.contains(e.target)) return;
+    const paletteEl = $('#color-palette');
+    if (paletteEl && (e.target === paletteEl || paletteEl.contains(e.target))) return;
     if (state.inlineEdit) commitInlineEdit();
     if (!roomLinkPanel.classList.contains('hidden') && state.editingRoomLinkId) {
       saveRoomLinkPanel();
@@ -1597,11 +1653,13 @@
     }
     const pt = getLocalPoint(e);
     const world = worldFromScreen(pt.x, pt.y);
-    const middle = e.button === 1;
+    const middle = e.button === 1 || (e.buttons & 4) === 4;
     const panMode = state.tool === 'pan' || state.spaceDown || middle;
 
     if (panMode) {
-      state.panning = { sx: pt.x, sy: pt.y, cx: state.camera.x, cy: state.camera.y };
+      if (middle) e.preventDefault();
+      try { canvasWrap.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+      state.panning = { sx: pt.x, sy: pt.y, cx: state.camera.x, cy: state.camera.y, viaMiddle: !!middle };
       canvasWrap.style.cursor = 'grabbing';
       return;
     }
@@ -1945,7 +2003,10 @@
     if (state.drawing) {
       let obj = state.drawing;
       state.drawing = null;
-      if (obj.type === 'pen' && (!obj.points || obj.points.length < 2)) return draw();
+      if (obj.type === 'pen' && (!obj.points || obj.points.length < 2)) {
+        setTool('select');
+        return draw();
+      }
       if (SHAPE_TYPES.has(obj.type) && Math.abs(obj.w) < 4 && Math.abs(obj.h) < 4) {
         // default size click
         obj.w = obj.type === 'event' ? 100 : 80;
@@ -1953,12 +2014,14 @@
         if (obj.type === 'task') { obj.w = 120; obj.h = 70; }
       }
       if ((obj.type === 'line' || obj.type === 'arrow') && Math.hypot(obj.x2 - obj.x1, obj.y2 - obj.y1) < 3) {
+        setTool('select');
         return draw();
       }
       obj = normalizeShape(obj);
       state.objects.push(obj);
       emit('object-add', obj);
       state.selectedIds = new Set([obj.id]);
+      setTool('select');
       draw();
     }
   });
