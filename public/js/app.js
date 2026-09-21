@@ -77,6 +77,9 @@
     hoverConnectorId: null,
     columns: [],
     cards: [],
+    personalColumns: [],
+    personalCards: [],
+    kanbanMode: 'personal', // personal | room
     messages: [],
     users: new Map(),
     camera: { x: 0, y: 0, scale: 1 },
@@ -162,6 +165,9 @@
   function clearSession() {
     state.token = null;
     state.account = null;
+    state.personalColumns = [];
+    state.personalCards = [];
+    state.kanbanMode = 'personal';
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
     if (state.socket) {
@@ -375,6 +381,7 @@
     lobby.classList.add('hidden');
     app.classList.remove('hidden');
     $('#room-badge').textContent = state.roomId;
+    updateKanbanChrome();
     updateUserChrome();
     renderTabs();
     renderPresence();
@@ -509,12 +516,46 @@
   loadTabs();
 
   // ---------- Views ----------
-  function setView(view) {
+  function setKanbanMode(mode) {
+    state.kanbanMode = mode === 'room' ? 'room' : 'personal';
+    closeCardPanel();
+    updateKanbanChrome();
+    if (state.view === 'kanban') renderKanban();
+  }
+
+  function updateKanbanChrome() {
+    const personal = state.kanbanMode === 'personal';
+    const titleEl = $('#kanban-board-title');
+    if (titleEl) {
+      titleEl.textContent = personal
+        ? 'Мой канбан'
+        : ('Канбан комнаты · ' + (state.roomId || '—'));
+    }
+    const btnPers = $('#btn-kanban-personal');
+    const btnRoom = $('#btn-kanban-room');
+    if (btnPers) {
+      btnPers.classList.toggle('hidden', personal);
+      btnPers.classList.toggle('active', personal);
+    }
+    if (btnRoom) {
+      btnRoom.classList.toggle('hidden', !personal);
+      btnRoom.classList.toggle('active', !personal);
+    }
+    $('#tab-canvas').classList.toggle('active', state.view === 'canvas');
+    $('#tab-kanban').classList.toggle('active', state.view === 'kanban' && personal);
+    const roomTab = $('#tab-room-kanban');
+    if (roomTab) roomTab.classList.toggle('active', state.view === 'kanban' && !personal);
+  }
+
+  function setView(view, opts) {
+    opts = opts || {};
     state.view = view;
+    if (view === 'kanban' && opts.kanbanMode) {
+      state.kanbanMode = opts.kanbanMode === 'room' ? 'room' : 'personal';
+    }
     $('#view-canvas').classList.toggle('hidden', view !== 'canvas');
     $('#view-kanban').classList.toggle('hidden', view !== 'kanban');
-    $('#tab-canvas').classList.toggle('active', view === 'canvas');
-    $('#tab-kanban').classList.toggle('active', view === 'kanban');
+    updateKanbanChrome();
     if (view === 'canvas') {
       resizeCanvas();
       draw();
@@ -524,7 +565,19 @@
     }
   }
   $('#tab-canvas').addEventListener('click', () => setView('canvas'));
-  $('#tab-kanban').addEventListener('click', () => setView('kanban'));
+  $('#tab-kanban').addEventListener('click', () => setView('kanban', { kanbanMode: 'personal' }));
+  const tabRoomKanban = $('#tab-room-kanban');
+  if (tabRoomKanban) {
+    tabRoomKanban.addEventListener('click', () => setView('kanban', { kanbanMode: 'room' }));
+  }
+  const btnKanbanPersonal = $('#btn-kanban-personal');
+  const btnKanbanRoom = $('#btn-kanban-room');
+  if (btnKanbanPersonal) {
+    btnKanbanPersonal.addEventListener('click', () => setView('kanban', { kanbanMode: 'personal' }));
+  }
+  if (btnKanbanRoom) {
+    btnKanbanRoom.addEventListener('click', () => setView('kanban', { kanbanMode: 'room' }));
+  }
 
   // ---------- Tools ----------
   function setTool(tool) {
@@ -727,32 +780,36 @@
     });
     socket.on('card-add', (card) => {
       if (!state.cards.find((c) => c.id === card.id)) state.cards.push(card);
-      renderKanban();
-      if (state.editingCardId === card.id) syncCardPanel(card);
+      if (state.kanbanMode === 'room') {
+        renderKanban();
+        if (state.editingCardId === card.id) syncCardPanel(card);
+      }
     });
     socket.on('card-update', (card) => {
       const i = state.cards.findIndex((c) => c.id === card.id);
       if (i >= 0) state.cards[i] = card;
-      renderKanban();
-      if (state.editingCardId === card.id) syncCardPanel(card);
+      if (state.kanbanMode === 'room') {
+        renderKanban();
+        if (state.editingCardId === card.id) syncCardPanel(card);
+      }
     });
     socket.on('card-delete', ({ id }) => {
       state.cards = state.cards.filter((c) => c.id !== id);
-      if (state.editingCardId === id) closeCardPanel();
-      renderKanban();
+      if (state.editingCardId === id && state.kanbanMode === 'room') closeCardPanel();
+      if (state.kanbanMode === 'room') renderKanban();
     });
     socket.on('cards-reorder', ({ cards }) => {
       state.cards = cards;
-      renderKanban();
+      if (state.kanbanMode === 'room') renderKanban();
     });
     socket.on('column-add', (col) => {
       if (!state.columns.find((c) => c.id === col.id)) state.columns.push(col);
-      renderKanban();
+      if (state.kanbanMode === 'room') renderKanban();
     });
     socket.on('column-rename', ({ id, title }) => {
       const col = state.columns.find((c) => c.id === id);
       if (col) col.title = title;
-      renderKanban();
+      if (state.kanbanMode === 'room') renderKanban();
     });
     socket.on('column-delete', ({ id, fallbackColumnId, cards }) => {
       state.columns = state.columns.filter((c) => c.id !== id);
@@ -762,7 +819,59 @@
           if (c.columnId === id) c.columnId = fallbackColumnId;
         }
       }
-      renderKanban();
+      if (state.kanbanMode === 'room') renderKanban();
+    });
+
+    socket.on('personal-kanban-state', (payload) => {
+      applyPersonalKanbanState(payload);
+    });
+    socket.on('personal-card-add', (card) => {
+      if (!state.personalCards.find((c) => c.id === card.id)) state.personalCards.push(card);
+      if (state.kanbanMode === 'personal') {
+        renderKanban();
+        if (state.editingCardId === card.id) syncCardPanel(card);
+      }
+    });
+    socket.on('personal-card-update', (card) => {
+      const i = state.personalCards.findIndex((c) => c.id === card.id);
+      if (i >= 0) state.personalCards[i] = card;
+      if (state.kanbanMode === 'personal') {
+        renderKanban();
+        if (state.editingCardId === card.id) syncCardPanel(card);
+      }
+    });
+    socket.on('personal-card-delete', ({ id }) => {
+      state.personalCards = state.personalCards.filter((c) => c.id !== id);
+      if (state.editingCardId === id && state.kanbanMode === 'personal') closeCardPanel();
+      if (state.kanbanMode === 'personal') renderKanban();
+    });
+    socket.on('personal-cards-reorder', ({ cards }) => {
+      state.personalCards = cards;
+      if (state.kanbanMode === 'personal') renderKanban();
+    });
+    socket.on('personal-column-add', (col) => {
+      if (!state.personalColumns.find((c) => c.id === col.id)) state.personalColumns.push(col);
+      if (state.kanbanMode === 'personal') renderKanban();
+    });
+    socket.on('personal-column-update', ({ id, title }) => {
+      const col = state.personalColumns.find((c) => c.id === id);
+      if (col) col.title = title;
+      if (state.kanbanMode === 'personal') renderKanban();
+    });
+    socket.on('personal-column-rename', ({ id, title }) => {
+      const col = state.personalColumns.find((c) => c.id === id);
+      if (col) col.title = title;
+      if (state.kanbanMode === 'personal') renderKanban();
+    });
+    socket.on('personal-column-delete', ({ id, fallbackColumnId, cards }) => {
+      state.personalColumns = state.personalColumns.filter((c) => c.id !== id);
+      if (cards) state.personalCards = cards;
+      else {
+        for (const c of state.personalCards) {
+          if (c.columnId === id) c.columnId = fallbackColumnId;
+        }
+      }
+      if (state.kanbanMode === 'personal') renderKanban();
     });
     socket.on('chat-message', (msg) => {
       if (!state.messages.find((m) => m.id === msg.id)) {
@@ -2158,8 +2267,31 @@
   });
 
   // ---------- Kanban ----------
+  function applyPersonalKanbanState(payload) {
+    if (!payload) return;
+    state.personalColumns = Array.isArray(payload.columns) ? payload.columns : [];
+    state.personalCards = (Array.isArray(payload.cards) ? payload.cards : []).map((c) => ({
+      dueDate: null,
+      ...c,
+    }));
+    if (state.kanbanMode === 'personal' && state.view === 'kanban') renderKanban();
+  }
+
+  function activeColumns() {
+    return state.kanbanMode === 'personal' ? state.personalColumns : state.columns;
+  }
+
+  function activeCards() {
+    return state.kanbanMode === 'personal' ? state.personalCards : state.cards;
+  }
+
+  function kanbanEmit(name, data, ack) {
+    const event = state.kanbanMode === 'personal' ? ('personal-' + name) : name;
+    emit(event, data, ack);
+  }
+
   function cardsInColumn(colId) {
-    return state.cards
+    return activeCards()
       .filter((c) => c.columnId === colId)
       .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
   }
@@ -2187,8 +2319,9 @@
   }
 
   function renderKanban() {
+    updateKanbanChrome();
     kanbanBoard.innerHTML = '';
-    const cols = [...state.columns].sort((a, b) => a.order - b.order);
+    const cols = [...activeColumns()].sort((a, b) => a.order - b.order);
     for (const col of cols) {
       const cards = cardsInColumn(col.id);
       const el = document.createElement('div');
@@ -2244,7 +2377,7 @@
     $$('.kanban-add').forEach((btn) => {
       btn.addEventListener('click', () => {
         const columnId = btn.dataset.add;
-        emit('card-add', {
+        kanbanEmit('card-add', {
           columnId,
           title: 'Новая карточка',
           description: '',
@@ -2258,32 +2391,36 @@
 
     $$('.kanban-col-title').forEach((input) => {
       input.addEventListener('change', () => {
-        emit('column-rename', { id: input.dataset.col, title: input.value.trim() || 'Колонка' });
+        if (state.kanbanMode === 'personal') {
+          kanbanEmit('column-update', { id: input.dataset.col, title: input.value.trim() || 'Колонка' });
+        } else {
+          emit('column-rename', { id: input.dataset.col, title: input.value.trim() || 'Колонка' });
+        }
       });
     });
 
     $$('.kanban-col-del').forEach((btn) => {
       btn.addEventListener('click', () => {
-        if (state.columns.length <= 1) {
+        if (activeColumns().length <= 1) {
           toast('Нужна хотя бы одна колонка');
           return;
         }
-        emit('column-delete', { id: btn.dataset.delCol });
+        kanbanEmit('column-delete', { id: btn.dataset.delCol });
       });
     });
   }
 
   $('#btn-add-column').addEventListener('click', () => {
-    emit('column-add', { title: 'Новая колонка' });
+    kanbanEmit('column-add', { title: 'Новая колонка' });
   });
 
   function moveCardToColumn(cardId, columnId) {
-    const card = state.cards.find((c) => c.id === cardId);
+    const card = activeCards().find((c) => c.id === cardId);
     if (!card) return;
     const order = cardsInColumn(columnId).filter((c) => c.id !== cardId).length;
     card.columnId = columnId;
     card.order = order;
-    emit('card-update', { id: cardId, columnId, order });
+    kanbanEmit('card-update', { id: cardId, columnId, order });
     renderKanban();
   }
 
@@ -2295,7 +2432,7 @@
   }
 
   function openCardPanel(id) {
-    const card = state.cards.find((c) => c.id === id);
+    const card = activeCards().find((c) => c.id === id);
     if (!card) return;
     state.editingCardId = id;
     $('#card-title').value = card.title;
@@ -2311,7 +2448,7 @@
 
   function saveCardPanel() {
     if (!state.editingCardId) return;
-    emit('card-update', {
+    kanbanEmit('card-update', {
       id: state.editingCardId,
       title: $('#card-title').value.trim() || 'Без названия',
       description: $('#card-desc').value,
@@ -2330,7 +2467,7 @@
   });
   $('#card-delete-btn').addEventListener('click', () => {
     if (!state.editingCardId) return;
-    emit('card-delete', { id: state.editingCardId });
+    kanbanEmit('card-delete', { id: state.editingCardId });
     closeCardPanel();
   });
 
