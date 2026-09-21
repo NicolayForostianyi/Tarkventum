@@ -33,6 +33,7 @@
 
   // ---------- Themes ----------
   const THEMES = ['black', 'white', 'green', 'blue'];
+  let boardReady = false;
   function applyTheme(name) {
     const theme = THEMES.includes(name) ? name : 'black';
     document.documentElement.setAttribute('data-theme', theme);
@@ -41,7 +42,8 @@
     const b = $('#theme-select-lobby');
     if (a) a.value = theme;
     if (b) b.value = theme;
-    if (typeof draw === 'function') draw();
+    // draw() closes over canvasWrap; only call after DOM bindings exist
+    if (boardReady) draw();
   }
   applyTheme(localStorage.getItem('tv_theme') || 'black');
 
@@ -128,6 +130,9 @@
 
   $('#theme-select').addEventListener('change', (e) => applyTheme(e.target.value));
   $('#theme-select-lobby').addEventListener('change', (e) => applyTheme(e.target.value));
+
+  boardReady = true;
+  applyTheme(localStorage.getItem('tv_theme') || 'black');
 
   // ---------- Auth ----------
   function showAuthError(msg) {
