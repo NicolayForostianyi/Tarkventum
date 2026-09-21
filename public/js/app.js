@@ -1466,11 +1466,12 @@
     }
     if (obj.type === 'sticky') return { x: obj.x, y: obj.y, w: obj.w || 160, h: obj.h || 120 };
     if (obj.type === 'text') {
+      const fs = objectFontSize(obj);
       ctx.save();
-      ctx.font = `${obj.fontSize || 18}px Segoe UI, system-ui, sans-serif`;
+      ctx.font = `${fs}px Segoe UI, system-ui, sans-serif`;
       const w = ctx.measureText(obj.text || ' ').width;
       ctx.restore();
-      return { x: obj.x, y: obj.y - (obj.fontSize || 18), w, h: (obj.fontSize || 18) * 1.2 };
+      return { x: obj.x, y: obj.y - fs, w, h: fs * 1.2 };
     }
     return null;
   }
@@ -1818,9 +1819,9 @@
     inlineEditEl.style.top = `${tl.y}px`;
     inlineEditEl.style.width = `${Math.max(80, br.x - tl.x)}px`;
     inlineEditEl.style.height = `${Math.max(28, br.y - tl.y)}px`;
-    inlineEditEl.style.fontSize = obj.type === 'text'
-      ? `${(obj.fontSize || 18) * state.camera.scale}px`
-      : `${14 * state.camera.scale}px`;
+    const editFs = objectFontSize(obj);
+    inlineEditEl.style.fontSize = `${editFs * state.camera.scale}px`;
+    inlineEditEl.style.color = objectTextColor(obj);
     inlineEditEl.style.zIndex = '30';
 
     const initial = obj.type === 'text' || obj.type === 'sticky'
@@ -2140,6 +2141,8 @@
         fill: 'transparent',
         strokeWidth: 2,
         label: '',
+        textColor: state.textColor,
+        fontSize: state.fontSize || 18,
       };
       return;
     }
@@ -2183,6 +2186,8 @@
         roomId: '',
         label: '',
         text: '',
+        textColor: state.textColor,
+        fontSize: state.fontSize || 18,
       };
       state.objects.push(obj);
       emit('object-add', obj);
@@ -2203,6 +2208,8 @@
         h: 120,
         text: '',
         fill: '#fef08a',
+        textColor: state.textColor,
+        fontSize: state.fontSize || 18,
       };
       state.objects.push(obj);
       emit('object-add', obj);
@@ -2220,8 +2227,9 @@
         x: world.x,
         y: world.y,
         text: '',
-        stroke: state.strokeColor,
-        fontSize: 18,
+        stroke: state.textColor,
+        textColor: state.textColor,
+        fontSize: state.fontSize || 18,
         w: 120,
         h: 24,
       };
