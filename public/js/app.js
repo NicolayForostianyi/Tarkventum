@@ -32,10 +32,20 @@
   }
 
   // ---------- Themes ----------
-  const THEMES = ['black', 'white', 'green', 'blue', 'red', 'orange', 'yellow', 'pink', 'gold'];
+  const THEMES_FALLBACK = ['black', 'white', 'green', 'blue', 'red', 'orange', 'yellow', 'pink', 'gold'];
   let boardReady = false;
+
+  function listThemes() {
+    const fromSelect = $$('#theme-select option, #theme-select-lobby option')
+      .map((o) => o.value)
+      .filter(Boolean);
+    return fromSelect.length ? [...new Set(fromSelect)] : THEMES_FALLBACK.slice();
+  }
+
   function applyTheme(name) {
-    const theme = THEMES.includes(name) ? name : 'black';
+    const themes = listThemes();
+    let theme = String(name || 'black').trim();
+    if (!themes.includes(theme)) theme = 'black';
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('tv_theme', theme);
     const a = $('#theme-select');
