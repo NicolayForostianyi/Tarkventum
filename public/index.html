@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Tarkventum — доска и Канбан</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="/css/styles.css?v=20260921b" />
+  <link rel="stylesheet" href="/css/styles.css?v=20260921c" />
 </head>
 <body>
   <!-- Auth overlay -->
@@ -197,20 +197,32 @@
               </div>
               <p class="room-link-hint">Двойной клик по фигуре — открыть комнату. Alt+двойной клик — изменить.</p>
             </div>
-                        <div id="color-palette" class="color-palette" title="Цвет">
-              <button type="button" class="swatch" data-color="#1f2937" style="--sw:#1f2937" title="Чёрный"></button>
-              <button type="button" class="swatch" data-color="#ef4444" style="--sw:#ef4444" title="Красный"></button>
-              <button type="button" class="swatch" data-color="#f97316" style="--sw:#f97316" title="Оранжевый"></button>
-              <button type="button" class="swatch" data-color="#eab308" style="--sw:#eab308" title="Жёлтый"></button>
-              <button type="button" class="swatch" data-color="#22c55e" style="--sw:#22c55e" title="Зелёный"></button>
-              <button type="button" class="swatch" data-color="#06b6d4" style="--sw:#06b6d4" title="Бирюзовый"></button>
-              <button type="button" class="swatch" data-color="#3b82f6" style="--sw:#3b82f6" title="Синий"></button>
-              <button type="button" class="swatch" data-color="#8b5cf6" style="--sw:#8b5cf6" title="Фиолетовый"></button>
-              <button type="button" class="swatch" data-color="#ec4899" style="--sw:#ec4899" title="Розовый"></button>
-              <button type="button" class="swatch" data-color="#ffffff" style="--sw:#ffffff" title="Белый"></button>
-              <label class="swatch swatch-custom" title="Свой цвет">
-                <input id="palette-color" type="color" value="#1f2937" />
-              </label>
+            <div id="color-palette" class="color-palette" title="Цвет">
+              <div class="palette-modes" role="tablist" aria-label="Цель цвета">
+                <button type="button" class="palette-mode active" data-color-target="shape" role="tab" aria-selected="true">Фигура</button>
+                <button type="button" class="palette-mode" data-color-target="text" role="tab" aria-selected="false">Текст</button>
+              </div>
+              <div class="palette-swatches">
+                <button type="button" class="swatch" data-color="#1f2937" style="--sw:#1f2937" title="Чёрный"></button>
+                <button type="button" class="swatch" data-color="#ef4444" style="--sw:#ef4444" title="Красный"></button>
+                <button type="button" class="swatch" data-color="#f97316" style="--sw:#f97316" title="Оранжевый"></button>
+                <button type="button" class="swatch" data-color="#eab308" style="--sw:#eab308" title="Жёлтый"></button>
+                <button type="button" class="swatch" data-color="#22c55e" style="--sw:#22c55e" title="Зелёный"></button>
+                <button type="button" class="swatch" data-color="#06b6d4" style="--sw:#06b6d4" title="Бирюзовый"></button>
+                <button type="button" class="swatch" data-color="#3b82f6" style="--sw:#3b82f6" title="Синий"></button>
+                <button type="button" class="swatch" data-color="#8b5cf6" style="--sw:#8b5cf6" title="Фиолетовый"></button>
+                <button type="button" class="swatch" data-color="#ec4899" style="--sw:#ec4899" title="Розовый"></button>
+                <button type="button" class="swatch" data-color="#ffffff" style="--sw:#ffffff" title="Белый"></button>
+                <label class="swatch swatch-custom" title="Свой цвет">
+                  <input id="palette-color" type="color" value="#1f2937" />
+                </label>
+              </div>
+              <div class="palette-size" title="Размер текста">
+                <span class="palette-size-label">Размер</span>
+                <button type="button" id="font-size-dec" class="palette-size-btn" aria-label="Уменьшить размер">−</button>
+                <input id="font-size-input" type="number" min="10" max="72" value="18" step="1" />
+                <button type="button" id="font-size-inc" class="palette-size-btn" aria-label="Увеличить размер">+</button>
+              </div>
             </div>
 <div id="zoom-label" class="zoom-label">100%</div>
             <div id="connector-hint" class="connector-hint hidden">Выберите фигуру-источник, затем фигуру-цель</div>
@@ -313,6 +325,6 @@
   <div id="toast" class="toast hidden"></div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/js/app.js?v=20260921b"></script>
+  <script src="/js/app.js?v=20260921c"></script>
 </body>
 </html>
