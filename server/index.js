@@ -33,6 +33,7 @@ function createRoom(id) {
   return {
     id,
     objects: [],
+    connectors: [],
     columns: DEFAULT_COLUMNS.map((c) => ({ ...c })),
     cards: [],
     messages: [],
@@ -48,6 +49,7 @@ function getOrCreateRoom(roomId) {
 function roomPublicState(room) {
   return {
     objects: room.objects,
+    connectors: room.connectors,
     columns: room.columns,
     cards: room.cards,
     messages: room.messages,
@@ -70,6 +72,20 @@ function pickColor(room) {
 
 function genId(prefix) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeCard(card, room, fallbackColumnId) {
+  const columnId = card.columnId || fallbackColumnId || room.columns[0]?.id;
+  return {
+    id: card.id || genId('card'),
+    columnId,
+    title: String(card.title || 'Новая карточка').slice(0, 200),
+    description: String(card.description || '').slice(0, 2000),
+    dueDate: card.dueDate ? String(card.dueDate).slice(0, 32) : null,
+    order: typeof card.order === 'number'
+      ? card.order
+      : room.cards.filter((c) => c.columnId === columnId).length,
+  };
 }
 
 io.on('connection', (socket) => {
@@ -136,6 +152,10 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('leave-room', () => {
+    leaveCurrent();
+  });
+
   socket.on('cursor-move', (payload) => {
     if (!currentRoom || !userId) return;
     const room = rooms.get(currentRoom);
@@ -173,20 +193,62 @@ io.on('connection', (socket) => {
     if (!room) return;
     const set = new Set(ids);
     room.objects = room.objects.filter((o) => !set.has(o.id));
+    const removedConnectors = room.connectors.filter(
+      (c) => set.has(c.fromId) || set.has(c.toId) || set.has(c.id)
+    );
+    room.connectors = room.connectors.filter(
+      (c) => !set.has(c.fromId) && !set.has(c.toId) && !set.has(c.id)
+    );
     socket.to(currentRoom).emit('object-delete', { ids });
+    if (removedConnectors.length) {
+      const connIds = removedConnectors.map((c) => c.id);
+      io.to(currentRoom).emit('connector-delete', { ids: connIds });
+    }
+  });
+
+  socket.on('connector-add', (conn) => {
+    if (!currentRoom || !conn || !conn.id) return;
+    const room = rooms.get(currentRoom);
+    if (!room) return;
+    if (!conn.fromId || !conn.toId || conn.fromId === conn.toId) return;
+    if (room.connectors.some((c) => c.id === conn.id)) return;
+    const item = {
+      id: conn.id,
+      type: 'connector',
+      fromId: conn.fromId,
+      toId: conn.toId,
+      stroke: conn.stroke || '#64748b',
+      strokeWidth: conn.strokeWidth || 2,
+      arrow: conn.arrow !== false,
+    };
+    room.connectors.push(item);
+    io.to(currentRoom).emit('connector-add', item);
+  });
+
+  socket.on('connector-update', (conn) => {
+    if (!currentRoom || !conn || !conn.id) return;
+    const room = rooms.get(currentRoom);
+    if (!room) return;
+    const idx = room.connectors.findIndex((c) => c.id === conn.id);
+    if (idx < 0) return;
+    room.connectors[idx] = { ...room.connectors[idx], ...conn };
+    socket.to(currentRoom).emit('connector-update', room.connectors[idx]);
+  });
+
+  socket.on('connector-delete', ({ ids }) => {
+    if (!currentRoom || !Array.isArray(ids)) return;
+    const room = rooms.get(currentRoom);
+    if (!room) return;
+    const set = new Set(ids);
+    room.connectors = room.connectors.filter((c) => !set.has(c.id));
+    socket.to(currentRoom).emit('connector-delete', { ids });
   });
 
   socket.on('card-add', (card, ack) => {
     if (!currentRoom) return;
     const room = rooms.get(currentRoom);
     if (!room) return;
-    const newCard = {
-      id: card.id || genId('card'),
-      columnId: card.columnId || room.columns[0].id,
-      title: (card.title || 'Новая карточка').slice(0, 200),
-      description: (card.description || '').slice(0, 2000),
-      order: typeof card.order === 'number' ? card.order : room.cards.filter((c) => c.columnId === (card.columnId || room.columns[0].id)).length,
-    };
+    const newCard = normalizeCard(card, room, card.columnId);
     room.cards.push(newCard);
     io.to(currentRoom).emit('card-add', newCard);
     if (typeof ack === 'function') ack({ ok: true, card: newCard });
@@ -203,6 +265,9 @@ io.on('connection', (socket) => {
       ...prev,
       title: card.title !== undefined ? String(card.title).slice(0, 200) : prev.title,
       description: card.description !== undefined ? String(card.description).slice(0, 2000) : prev.description,
+      dueDate: card.dueDate !== undefined
+        ? (card.dueDate ? String(card.dueDate).slice(0, 32) : null)
+        : prev.dueDate,
       columnId: card.columnId !== undefined ? card.columnId : prev.columnId,
       order: card.order !== undefined ? card.order : prev.order,
     };
@@ -232,6 +297,23 @@ io.on('connection', (socket) => {
     io.to(currentRoom).emit('cards-reorder', { cards: room.cards });
   });
 
+  socket.on('column-add', (payload, ack) => {
+    if (!currentRoom) return;
+    const room = rooms.get(currentRoom);
+    if (!room) return;
+    const order = room.columns.length
+      ? Math.max(...room.columns.map((c) => c.order)) + 1
+      : 0;
+    const col = {
+      id: (payload && payload.id) || genId('col'),
+      title: String((payload && payload.title) || 'Новая колонка').slice(0, 64),
+      order: typeof payload?.order === 'number' ? payload.order : order,
+    };
+    room.columns.push(col);
+    io.to(currentRoom).emit('column-add', col);
+    if (typeof ack === 'function') ack({ ok: true, column: col });
+  });
+
   socket.on('column-rename', ({ id, title }) => {
     if (!currentRoom || !id) return;
     const room = rooms.get(currentRoom);
@@ -240,6 +322,19 @@ io.on('connection', (socket) => {
     if (!col) return;
     col.title = String(title || col.title).slice(0, 64);
     io.to(currentRoom).emit('column-rename', { id, title: col.title });
+  });
+
+  socket.on('column-delete', ({ id }) => {
+    if (!currentRoom || !id) return;
+    const room = rooms.get(currentRoom);
+    if (!room) return;
+    if (room.columns.length <= 1) return;
+    room.columns = room.columns.filter((c) => c.id !== id);
+    const fallback = room.columns[0].id;
+    for (const card of room.cards) {
+      if (card.columnId === id) card.columnId = fallback;
+    }
+    io.to(currentRoom).emit('column-delete', { id, fallbackColumnId: fallback, cards: room.cards });
   });
 
   socket.on('chat-message', ({ text }, ack) => {

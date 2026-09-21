@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="ru" data-theme="black">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -23,6 +23,15 @@
         <span>Код комнаты</span>
         <input id="room-input" type="text" maxlength="32" placeholder="например: demo" autocomplete="off" />
       </label>
+      <label class="field">
+        <span>Тема оформления</span>
+        <select id="theme-select-lobby" class="theme-select">
+          <option value="black">Чёрная</option>
+          <option value="white">Белая</option>
+          <option value="green">Зелёная</option>
+          <option value="blue">Синяя</option>
+        </select>
+      </label>
       <div class="lobby-actions">
         <button id="btn-create" class="btn primary" type="button">Создать комнату</button>
         <button id="btn-join" class="btn" type="button">Войти</button>
@@ -34,6 +43,12 @@
 
   <!-- App -->
   <div id="app" class="app hidden">
+    <!-- Browser-like room tabs -->
+    <div class="room-tabs-bar" id="room-tabs-bar">
+      <div class="room-tabs" id="room-tabs"></div>
+      <button id="btn-new-tab" class="room-tab-new" type="button" title="Новая вкладка / открыть комнату">+</button>
+    </div>
+
     <header class="topbar">
       <div class="topbar-left">
         <span class="brand">Tarkventum</span>
@@ -45,6 +60,12 @@
         <button id="tab-kanban" class="tab" type="button" data-view="kanban">Канбан</button>
       </div>
       <div class="topbar-right">
+        <select id="theme-select" class="theme-select compact" title="Тема">
+          <option value="black">Чёрная</option>
+          <option value="white">Белая</option>
+          <option value="green">Зелёная</option>
+          <option value="blue">Синяя</option>
+        </select>
         <div id="presence" class="presence"></div>
         <button id="btn-leave" class="btn ghost small" type="button">Выйти</button>
       </div>
@@ -58,8 +79,16 @@
             <button class="tool active" data-tool="select" title="Выделение (V)" type="button">↖</button>
             <button class="tool" data-tool="pan" title="Рука / панорама (H)" type="button">✋</button>
             <button class="tool" data-tool="pen" title="Перо (P)" type="button">✎</button>
+            <div class="tool-sep"></div>
             <button class="tool" data-tool="rect" title="Прямоугольник (R)" type="button">▭</button>
-            <button class="tool" data-tool="ellipse" title="Эллипс (O)" type="button">◯</button>
+            <button class="tool" data-tool="square" title="Квадрат" type="button">□</button>
+            <button class="tool" data-tool="circle" title="Круг" type="button">○</button>
+            <button class="tool" data-tool="ellipse" title="Эллипс / овал (O)" type="button">◯</button>
+            <button class="tool" data-tool="task" title="BPMN: задача" type="button">▢</button>
+            <button class="tool" data-tool="gateway" title="BPMN: шлюз" type="button">◇</button>
+            <button class="tool" data-tool="event" title="BPMN: событие" type="button">⬭</button>
+            <div class="tool-sep"></div>
+            <button class="tool" data-tool="connector" title="Соединитель (C)" type="button">⟷</button>
             <button class="tool" data-tool="line" title="Линия (L)" type="button">╱</button>
             <button class="tool" data-tool="arrow" title="Стрелка (A)" type="button">→</button>
             <button class="tool" data-tool="sticky" title="Стикер (S)" type="button">🗒</button>
@@ -73,15 +102,47 @@
           <div class="canvas-wrap" id="canvas-wrap">
             <canvas id="board"></canvas>
             <div id="cursors" class="cursors"></div>
+            <div id="inline-edit" class="inline-edit hidden" contenteditable="true" spellcheck="false"></div>
             <div id="zoom-label" class="zoom-label">100%</div>
+            <div id="connector-hint" class="connector-hint hidden">Выберите фигуру-источник, затем фигуру-цель</div>
           </div>
         </section>
 
         <!-- Kanban view -->
         <section id="view-kanban" class="view view-kanban hidden">
+          <div class="kanban-toolbar">
+            <button id="btn-add-column" class="btn primary small" type="button">+ Колонка</button>
+          </div>
           <div id="kanban-board" class="kanban-board"></div>
         </section>
       </div>
+
+      <!-- Card side panel -->
+      <aside id="card-panel" class="card-panel hidden">
+        <div class="card-panel-header">
+          <h2>Карточка</h2>
+          <button id="card-panel-close" class="btn ghost small" type="button" title="Закрыть">✕</button>
+        </div>
+        <div class="card-panel-body">
+          <label class="field">
+            <span>Заголовок</span>
+            <input id="card-title" type="text" maxlength="200" />
+          </label>
+          <label class="field">
+            <span>Описание</span>
+            <textarea id="card-desc" rows="6" maxlength="2000" placeholder="Текст описания…"></textarea>
+          </label>
+          <label class="field">
+            <span>Срок</span>
+            <input id="card-due" type="date" />
+          </label>
+          <div class="modal-actions">
+            <button id="card-delete-btn" class="btn danger" type="button">Удалить</button>
+            <div class="spacer"></div>
+            <button id="card-save-btn" class="btn primary" type="button">Сохранить</button>
+          </div>
+        </div>
+      </aside>
 
       <!-- Chat sidebar -->
       <aside class="chat-panel" id="chat-panel">
@@ -98,23 +159,18 @@
     </div>
   </div>
 
-  <!-- Modals -->
-  <div id="modal-card" class="modal hidden">
+  <!-- Open room dialog -->
+  <div id="modal-open-room" class="modal hidden">
     <div class="modal-card">
-      <h3 id="modal-card-title">Карточка</h3>
+      <h3>Открыть комнату</h3>
       <label class="field">
-        <span>Заголовок</span>
-        <input id="card-title" type="text" maxlength="200" />
-      </label>
-      <label class="field">
-        <span>Описание</span>
-        <textarea id="card-desc" rows="4" maxlength="2000"></textarea>
+        <span>Код комнаты</span>
+        <input id="open-room-input" type="text" maxlength="32" placeholder="код или пусто — создать новую" />
       </label>
       <div class="modal-actions">
-        <button id="card-delete-btn" class="btn danger" type="button">Удалить</button>
         <div class="spacer"></div>
-        <button id="card-cancel-btn" class="btn" type="button">Отмена</button>
-        <button id="card-save-btn" class="btn primary" type="button">Сохранить</button>
+        <button id="open-room-cancel" class="btn" type="button">Отмена</button>
+        <button id="open-room-ok" class="btn primary" type="button">Открыть</button>
       </div>
     </div>
   </div>
