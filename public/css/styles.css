@@ -246,7 +246,7 @@ button { cursor: pointer; }
   background-size: 32px 32px;
   cursor: crosshair;
 }
-#board { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#board { position: absolute; inset: 0; width: 100%; height: 100%; display: block; z-index: 0; }
 .cursors { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
 .remote-cursor {
   position: absolute; transform: translate(-2px, -2px); pointer-events: none;
@@ -267,7 +267,7 @@ button { cursor: pointer; }
 }
 .remote-cursor .label span { color: #fff; mix-blend-mode: difference; }
 .zoom-label {
-  position: absolute; right: 12px; bottom: 12px;
+  position: absolute; right: 12px; bottom: 56px;
   background: color-mix(in srgb, var(--bg-elev) 90%, transparent); border: 1px solid var(--border);
   padding: 4px 8px; border-radius: 8px; font-size: .75rem; color: var(--muted);
   pointer-events: none;
@@ -279,11 +279,13 @@ button { cursor: pointer; }
   pointer-events: none; box-shadow: var(--shadow); white-space: nowrap;
 }
 .inline-edit {
-  position: absolute; z-index: 5; min-width: 80px; min-height: 24px;
+  position: absolute; z-index: 30; min-width: 80px; min-height: 24px;
   padding: 6px 8px; border: 2px solid var(--selection); border-radius: 6px;
   background: var(--bg-elev); color: var(--text); outline: none;
   white-space: pre-wrap; word-break: break-word; box-shadow: var(--shadow);
   line-height: 1.35; overflow: auto;
+  pointer-events: auto; caret-color: currentColor;
+  -webkit-user-select: text; user-select: text;
 }
 .inline-edit.sticky-edit {
   background: var(--sticky); color: #1f2937; border-color: #ca8a04;
@@ -538,3 +540,32 @@ button { cursor: pointer; }
   .user-chip { display: none; }
   #btn-enable-notif { display: none; }
 }
+
+.color-palette {
+  position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%);
+  z-index: 8; display: flex; align-items: center; gap: 6px;
+  padding: 8px 10px; border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-elev) 92%, transparent);
+  border: 1px solid var(--border); box-shadow: var(--shadow);
+  backdrop-filter: blur(8px);
+}
+.color-palette .swatch {
+  width: 22px; height: 22px; border-radius: 999px; padding: 0;
+  border: 2px solid color-mix(in srgb, var(--text) 18%, transparent);
+  background: var(--sw, #888); cursor: pointer; flex-shrink: 0;
+}
+.color-palette .swatch:hover { transform: scale(1.08); }
+.color-palette .swatch.active {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+  border-color: var(--primary);
+}
+.color-palette .swatch-custom {
+  display: grid; place-items: center; overflow: hidden;
+  background: conic-gradient(red, yellow, lime, aqua, blue, magenta, red);
+}
+.color-palette .swatch-custom input {
+  width: 28px; height: 28px; border: 0; padding: 0; background: none; cursor: pointer;
+  transform: scale(1.4);
+}
+.zoom-label { bottom: 56px; }
