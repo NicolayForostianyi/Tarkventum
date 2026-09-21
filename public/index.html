@@ -107,7 +107,8 @@
       </div>
       <div class="view-tabs">
         <button id="tab-canvas" class="tab active" type="button" data-view="canvas">Холст</button>
-        <button id="tab-kanban" class="tab" type="button" data-view="kanban">Канбан</button>
+        <button id="tab-kanban" class="tab" type="button" data-view="kanban" data-kanban-mode="personal" title="Личный канбан">Мой канбан</button>
+        <button id="tab-room-kanban" class="tab tab-icon" type="button" data-view="kanban" data-kanban-mode="room" title="Канбан комнаты">👥</button>
       </div>
       <div class="topbar-right">
         <button id="btn-enable-notif" class="btn ghost small" type="button" title="Браузерные уведомления">🔔 Уведомления</button>
@@ -133,20 +134,28 @@
             <button class="tool" data-tool="pan" title="Рука / панорама (H)" type="button">✋</button>
             <button class="tool" data-tool="pen" title="Перо (P)" type="button">✎</button>
             <div class="tool-sep"></div>
-            <button class="tool" data-tool="rect" title="Прямоугольник (R)" type="button">▭</button>
-            <button class="tool" data-tool="square" title="Квадрат" type="button">□</button>
-            <button class="tool" data-tool="circle" title="Круг" type="button">○</button>
-            <button class="tool" data-tool="ellipse" title="Эллипс / овал (O)" type="button">◯</button>
-            <button class="tool" data-tool="task" title="BPMN: задача" type="button">▢</button>
-            <button class="tool" data-tool="gateway" title="BPMN: шлюз" type="button">◇</button>
-            <button class="tool" data-tool="event" title="BPMN: событие" type="button">⬭</button>
+            <div class="tool-group" title="Фигуры">
+              <span class="tool-group-label">фиг</span>
+              <button class="tool" data-tool="rect" title="Прямоугольник (R)" type="button">▭</button>
+              <button class="tool" data-tool="square" title="Квадрат" type="button">□</button>
+              <button class="tool" data-tool="circle" title="Круг" type="button">○</button>
+              <button class="tool" data-tool="ellipse" title="Эллипс / овал (O)" type="button">◯</button>
+            </div>
+            <div class="tool-group tool-group-bpmn" title="BPMN">
+              <span class="tool-group-label">bpmn</span>
+              <button class="tool" data-tool="task" title="BPMN: задача" type="button">▢</button>
+              <button class="tool" data-tool="gateway" title="BPMN: шлюз" type="button">◇</button>
+              <button class="tool" data-tool="event" title="BPMN: событие" type="button">⬭</button>
+            </div>
             <div class="tool-sep"></div>
             <button class="tool" data-tool="connector" title="Соединитель (C)" type="button">⟷</button>
             <button class="tool" data-tool="line" title="Линия (L)" type="button">╱</button>
             <button class="tool" data-tool="arrow" title="Стрелка (A)" type="button">→</button>
             <button class="tool" data-tool="sticky" title="Стикер (S)" type="button">🗒</button>
             <button class="tool" data-tool="text" title="Текст (T)" type="button">T</button>
-            <button class="tool" data-tool="roomLink" title="Ссылка на комнату" type="button">↗</button>
+            <button class="tool tool-room-link" data-tool="roomLink" title="Ссылка на комнату" type="button" aria-label="Ссылка на комнату">
+              <span class="tool-room-link-ico" aria-hidden="true">🔗</span>
+            </button>
             <div class="tool-sep"></div>
             <label class="color-pick" title="Цвет">
               <input id="stroke-color" type="color" value="#1f2937" />
@@ -200,6 +209,10 @@
         <!-- Kanban view -->
         <section id="view-kanban" class="view view-kanban hidden">
           <div class="kanban-toolbar">
+            <span id="kanban-board-title" class="kanban-board-title">Мой канбан</span>
+            <button id="btn-kanban-personal" class="btn ghost small kanban-mode-btn hidden" type="button" title="Мой канбан">👤 Мой</button>
+            <button id="btn-kanban-room" class="btn ghost small kanban-mode-btn" type="button" title="Канбан комнаты">👥 Комната</button>
+            <div class="spacer"></div>
             <button id="btn-add-column" class="btn primary small" type="button">+ Колонка</button>
           </div>
           <div id="kanban-board" class="kanban-board"></div>
