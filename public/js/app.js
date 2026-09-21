@@ -548,6 +548,7 @@
 
   function isTypingTarget(el) {
     if (!el) return false;
+    if (state.inlineEdit) return true;
     if (el === inlineEditEl || inlineEditEl.contains(el)) return true;
     if (roomLinkPanel && (el === roomLinkPanel || roomLinkPanel.contains(el))) return true;
     const tag = el.tagName;
@@ -559,6 +560,24 @@
       if (e.key === 'Escape' && state.inlineEdit) {
         e.preventDefault();
         cancelInlineEdit(true);
+        return;
+      }
+      // If focus left the editor, put it back and apply the key so typing still works
+      if (state.inlineEdit && document.activeElement !== inlineEditEl) {
+        inlineEditEl.focus({ preventScroll: true });
+        if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+          e.preventDefault();
+          document.execCommand('insertText', false, e.key);
+        } else if (e.key === 'Backspace') {
+          e.preventDefault();
+          document.execCommand('delete');
+        } else if (e.key === 'Enter' && !e.shiftKey) {
+          const obj = state.objects.find((o) => o.id === state.inlineEdit?.id);
+          if (obj && obj.type === 'sticky') {
+            e.preventDefault();
+            document.execCommand('insertText', false, '\n');
+          }
+        }
       }
       return;
     }
@@ -1394,6 +1413,23 @@
   }
 
   // ---------- Inline edit ----------
+  let inlineEditIgnoreBlurUntil = 0;
+  let pendingInlineEditId = null;
+
+  function queueInlineEdit(objOrId) {
+    const id = typeof objOrId === 'string' ? objOrId : objOrId?.id;
+    if (!id) return;
+    pendingInlineEditId = id;
+  }
+
+  function flushPendingInlineEdit() {
+    if (!pendingInlineEditId) return;
+    const id = pendingInlineEditId;
+    pendingInlineEditId = null;
+    const obj = state.objects.find((o) => o.id === id);
+    if (obj) startInlineEdit(obj);
+  }
+
   function startInlineEdit(obj) {
     if (!obj) return;
     if (obj.type !== 'text' && obj.type !== 'sticky' && !['task', 'gateway', 'event', 'rect', 'square', 'circle', 'ellipse'].includes(obj.type)) {
@@ -1413,6 +1449,7 @@
     inlineEditEl.style.fontSize = obj.type === 'text'
       ? `${(obj.fontSize || 18) * state.camera.scale}px`
       : `${14 * state.camera.scale}px`;
+    inlineEditEl.style.zIndex = '30';
 
     const initial = obj.type === 'text' || obj.type === 'sticky'
       ? (obj.text || '')
@@ -1423,12 +1460,18 @@
       original: initial,
       field: (obj.type === 'text' || obj.type === 'sticky') ? 'text' : 'label',
     };
-    inlineEditEl.focus();
-    const range = document.createRange();
-    range.selectNodeContents(inlineEditEl);
-    const sel = window.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(range);
+    inlineEditIgnoreBlurUntil = Date.now() + 200;
+    // Focus after the current pointer gesture ends so the canvas does not steal it back
+    const focusEditor = () => {
+      if (!state.inlineEdit || state.inlineEdit.id !== obj.id) return;
+      inlineEditEl.focus({ preventScroll: true });
+      const range = document.createRange();
+      range.selectNodeContents(inlineEditEl);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    };
+    requestAnimationFrame(() => setTimeout(focusEditor, 0));
   }
 
   function commitInlineEdit() {
@@ -1437,6 +1480,7 @@
     const value = inlineEditEl.innerText.replace(/\u00a0/g, ' ').trimEnd().slice(0, 500);
     const obj = state.objects.find((o) => o.id === id);
     state.inlineEdit = null;
+    inlineEditIgnoreBlurUntil = 0;
     inlineEditEl.classList.add('hidden');
     inlineEditEl.textContent = '';
     if (!obj) return;
@@ -1447,17 +1491,23 @@
   }
 
   function cancelInlineEdit(silent) {
+    pendingInlineEditId = null;
     if (!state.inlineEdit) {
       inlineEditEl.classList.add('hidden');
       return;
     }
     state.inlineEdit = null;
+    inlineEditIgnoreBlurUntil = 0;
     inlineEditEl.classList.add('hidden');
     inlineEditEl.textContent = '';
     if (!silent) draw();
   }
 
+  inlineEditEl.addEventListener('pointerdown', (e) => {
+    e.stopPropagation();
+  });
   inlineEditEl.addEventListener('keydown', (e) => {
+    e.stopPropagation();
     if (e.key === 'Escape') {
       e.preventDefault();
       cancelInlineEdit();
@@ -1472,6 +1522,12 @@
     }
   });
   inlineEditEl.addEventListener('blur', () => {
+    if (Date.now() < inlineEditIgnoreBlurUntil) {
+      requestAnimationFrame(() => {
+        if (state.inlineEdit) inlineEditEl.focus({ preventScroll: true });
+      });
+      return;
+    }
     if (state.inlineEdit) commitInlineEdit();
   });
 
@@ -1527,7 +1583,7 @@
 
   canvasWrap.addEventListener('pointerdown', (e) => {
     if (state.view !== 'canvas') return;
-    if (e.target === inlineEditEl) return;
+    if (e.target === inlineEditEl || inlineEditEl.contains(e.target)) return;
     if (roomLinkPanel.contains(e.target)) return;
     if (state.inlineEdit) commitInlineEdit();
     if (!roomLinkPanel.classList.contains('hidden') && state.editingRoomLinkId) {
@@ -1535,7 +1591,10 @@
       closeRoomLinkPanel();
     }
 
-    canvasWrap.setPointerCapture(e.pointerId);
+    const willPlaceEditable = state.tool === 'sticky' || state.tool === 'text';
+    if (!willPlaceEditable) {
+      canvasWrap.setPointerCapture(e.pointerId);
+    }
     const pt = getLocalPoint(e);
     const world = worldFromScreen(pt.x, pt.y);
     const middle = e.button === 1;
@@ -1613,7 +1672,7 @@
           if (e.altKey) openRoomLinkPanel(hit);
           else navigateRoomLink(hit);
         } else {
-          startInlineEdit(hit);
+          queueInlineEdit(hit);
         }
         lastClick = { time: 0, id: null };
         return;
@@ -1727,8 +1786,9 @@
       state.objects.push(obj);
       emit('object-add', obj);
       state.selectedIds = new Set([obj.id]);
+      setTool('select');
       draw();
-      startInlineEdit(obj);
+      queueInlineEdit(obj);
       return;
     }
 
@@ -1747,8 +1807,9 @@
       state.objects.push(obj);
       emit('object-add', obj);
       state.selectedIds = new Set([obj.id]);
+      setTool('select');
       draw();
-      startInlineEdit(obj);
+      queueInlineEdit(obj);
     }
   });
 
@@ -1866,6 +1927,7 @@
   }
 
   canvasWrap.addEventListener('pointerup', () => {
+    flushPendingInlineEdit();
     if (state.panning) {
       state.panning = false;
       setTool(state.tool);
