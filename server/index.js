@@ -14,6 +14,7 @@ const JWT_EXPIRES = process.env.JWT_EXPIRES || '30d';
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const DMS_FILE = path.join(DATA_DIR, 'dms.json');
+const PERSONAL_KANBAN_FILE = path.join(DATA_DIR, 'personal-kanban.json');
 
 const app = express();
 const server = http.createServer(app);
@@ -92,6 +93,52 @@ function saveDmsStore(store) {
 ensureDataDir();
 let usersStore = loadUsersStore();
 let dmsStore = loadDmsStore();
+
+function loadPersonalKanbanStore() {
+  const data = loadJson(PERSONAL_KANBAN_FILE, {});
+  return data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+}
+
+function savePersonalKanbanStore() {
+  saveJson(PERSONAL_KANBAN_FILE, personalKanbanStore);
+}
+
+/** @type {Record<string, { columns: object[], cards: object[] }>} */
+let personalKanbanStore = loadPersonalKanbanStore();
+
+function getPersonalBoard(userId) {
+  if (!personalKanbanStore[userId]) {
+    personalKanbanStore[userId] = {
+      columns: DEFAULT_COLUMNS.map((c) => ({ ...c })),
+      cards: [],
+    };
+  }
+  const board = personalKanbanStore[userId];
+  if (!Array.isArray(board.columns) || board.columns.length === 0) {
+    board.columns = DEFAULT_COLUMNS.map((c) => ({ ...c }));
+  }
+  if (!Array.isArray(board.cards)) board.cards = [];
+  return board;
+}
+
+function personalBoardPublic(userId) {
+  const board = getPersonalBoard(userId);
+  return { columns: board.columns, cards: board.cards };
+}
+
+function normalizeBoardCard(card, board, fallbackColumnId) {
+  const columnId = card.columnId || fallbackColumnId || board.columns[0]?.id;
+  return {
+    id: card.id || genId('card'),
+    columnId,
+    title: String(card.title || 'Новая карточка').slice(0, 200),
+    description: String(card.description || '').slice(0, 2000),
+    dueDate: card.dueDate ? String(card.dueDate).slice(0, 32) : null,
+    order: typeof card.order === 'number'
+      ? card.order
+      : board.cards.filter((c) => c.columnId === columnId).length,
+  };
+}
 
 function findUserByUsername(username) {
   const u = String(username || '').trim().toLowerCase();
@@ -378,6 +425,8 @@ io.on('connection', (socket) => {
     totalUnread: totalUnread(account.id),
   });
 
+  socket.emit('personal-kanban-state', personalBoardPublic(account.id));
+
   function leaveCurrent() {
     if (!currentRoom || !userId) return;
     const room = rooms.get(currentRoom);
@@ -658,6 +707,123 @@ io.on('connection', (socket) => {
     }
     io.to(currentRoom).emit('chat-message', message);
     if (typeof ack === 'function') ack({ ok: true, message });
+  });
+
+  // ---------- Personal Kanban (private per account) ----------
+  function emitPersonalState() {
+    emitToAccount(account.id, 'personal-kanban-state', personalBoardPublic(account.id));
+  }
+
+  socket.on('personal-kanban-get', (ack) => {
+    const state = personalBoardPublic(account.id);
+    if (typeof ack === 'function') ack({ ok: true, ...state });
+    else socket.emit('personal-kanban-state', state);
+  });
+
+  socket.on('personal-card-add', (card, ack) => {
+    const board = getPersonalBoard(account.id);
+    const newCard = normalizeBoardCard(card || {}, board, card && card.columnId);
+    board.cards.push(newCard);
+    savePersonalKanbanStore();
+    emitToAccount(account.id, 'personal-card-add', newCard);
+    if (typeof ack === 'function') ack({ ok: true, card: newCard });
+  });
+
+  socket.on('personal-card-update', (card) => {
+    if (!card || !card.id) return;
+    const board = getPersonalBoard(account.id);
+    const idx = board.cards.findIndex((c) => c.id === card.id);
+    if (idx < 0) return;
+    const prev = board.cards[idx];
+    board.cards[idx] = {
+      ...prev,
+      title: card.title !== undefined ? String(card.title).slice(0, 200) : prev.title,
+      description: card.description !== undefined ? String(card.description).slice(0, 2000) : prev.description,
+      dueDate: card.dueDate !== undefined
+        ? (card.dueDate ? String(card.dueDate).slice(0, 32) : null)
+        : prev.dueDate,
+      columnId: card.columnId !== undefined ? card.columnId : prev.columnId,
+      order: card.order !== undefined ? card.order : prev.order,
+    };
+    savePersonalKanbanStore();
+    emitToAccount(account.id, 'personal-card-update', board.cards[idx]);
+  });
+
+  socket.on('personal-card-delete', ({ id }) => {
+    if (!id) return;
+    const board = getPersonalBoard(account.id);
+    board.cards = board.cards.filter((c) => c.id !== id);
+    savePersonalKanbanStore();
+    emitToAccount(account.id, 'personal-card-delete', { id });
+  });
+
+  socket.on('personal-cards-reorder', ({ cards }) => {
+    if (!Array.isArray(cards)) return;
+    const board = getPersonalBoard(account.id);
+    const byId = new Map(board.cards.map((c) => [c.id, c]));
+    for (const patch of cards) {
+      const c = byId.get(patch.id);
+      if (c) {
+        if (patch.columnId !== undefined) c.columnId = patch.columnId;
+        if (patch.order !== undefined) c.order = patch.order;
+      }
+    }
+    savePersonalKanbanStore();
+    emitToAccount(account.id, 'personal-cards-reorder', { cards: board.cards });
+  });
+
+  socket.on('personal-column-add', (payload, ack) => {
+    const board = getPersonalBoard(account.id);
+    const order = board.columns.length
+      ? Math.max(...board.columns.map((c) => c.order)) + 1
+      : 0;
+    const col = {
+      id: (payload && payload.id) || genId('col'),
+      title: String((payload && payload.title) || 'Новая колонка').slice(0, 64),
+      order: typeof payload?.order === 'number' ? payload.order : order,
+    };
+    board.columns.push(col);
+    savePersonalKanbanStore();
+    emitToAccount(account.id, 'personal-column-add', col);
+    if (typeof ack === 'function') ack({ ok: true, column: col });
+  });
+
+  socket.on('personal-column-update', ({ id, title }) => {
+    if (!id) return;
+    const board = getPersonalBoard(account.id);
+    const col = board.columns.find((c) => c.id === id);
+    if (!col) return;
+    col.title = String(title || col.title).slice(0, 64);
+    savePersonalKanbanStore();
+    emitToAccount(account.id, 'personal-column-update', { id, title: col.title });
+  });
+
+  socket.on('personal-column-rename', ({ id, title }) => {
+    if (!id) return;
+    const board = getPersonalBoard(account.id);
+    const col = board.columns.find((c) => c.id === id);
+    if (!col) return;
+    col.title = String(title || col.title).slice(0, 64);
+    savePersonalKanbanStore();
+    emitToAccount(account.id, 'personal-column-update', { id, title: col.title });
+    emitToAccount(account.id, 'personal-column-rename', { id, title: col.title });
+  });
+
+  socket.on('personal-column-delete', ({ id }) => {
+    if (!id) return;
+    const board = getPersonalBoard(account.id);
+    if (board.columns.length <= 1) return;
+    board.columns = board.columns.filter((c) => c.id !== id);
+    const fallback = board.columns[0].id;
+    for (const card of board.cards) {
+      if (card.columnId === id) card.columnId = fallback;
+    }
+    savePersonalKanbanStore();
+    emitToAccount(account.id, 'personal-column-delete', {
+      id,
+      fallbackColumnId: fallback,
+      cards: board.cards,
+    });
   });
 
   // ---------- DMs ----------
