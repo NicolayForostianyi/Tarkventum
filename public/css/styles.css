@@ -205,6 +205,17 @@ button { cursor: pointer; }
   padding: 6px 14px; border-radius: 8px;
 }
 .tab.active { background: var(--bg-soft); color: var(--text); font-weight: 600; }
+.tab.tab-icon { padding: 6px 10px; font-size: 1rem; min-width: 36px; }
+.kanban-board-title {
+  font-weight: 600; font-size: .95rem; color: var(--text);
+  margin-right: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 40vw;
+}
+.kanban-mode-btn.active {
+  background: color-mix(in srgb, var(--primary) 20%, transparent);
+  color: var(--primary); border-color: color-mix(in srgb, var(--primary) 40%, transparent);
+}
+.kanban-toolbar .spacer { flex: 1; }
 .presence { display: flex; align-items: center; }
 .presence-dot {
   width: 28px; height: 28px; border-radius: 50%;
@@ -569,3 +580,37 @@ button { cursor: pointer; }
   transform: scale(1.4);
 }
 .zoom-label { bottom: 56px; }
+
+/* Toolbar groups + room-link accent */
+.tool-group {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  width: 100%; padding: 4px 2px 6px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-soft) 80%, transparent);
+  border: 1px solid var(--border);
+}
+.tool-group-bpmn {
+  background: color-mix(in srgb, var(--primary) 10%, var(--bg-soft));
+  border-color: color-mix(in srgb, var(--primary) 35%, var(--border));
+}
+.tool-group-label {
+  font-size: .55rem; font-weight: 700; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--muted); line-height: 1;
+  margin-bottom: 2px; user-select: none; pointer-events: none;
+}
+.tool-group .tool { width: 34px; height: 34px; font-size: .95rem; }
+.tool-room-link {
+  background: color-mix(in srgb, var(--primary) 22%, transparent) !important;
+  border: 1px solid color-mix(in srgb, var(--primary) 55%, transparent) !important;
+  color: var(--primary) !important;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary) 25%, transparent);
+}
+.tool-room-link:hover {
+  background: color-mix(in srgb, var(--primary) 34%, transparent) !important;
+}
+.tool-room-link.active {
+  background: color-mix(in srgb, var(--primary) 40%, transparent) !important;
+  border-color: var(--primary) !important;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 40%, transparent);
+}
+.tool-room-link-ico { font-size: 1.05rem; line-height: 1; }
