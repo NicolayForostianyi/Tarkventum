@@ -79,6 +79,9 @@
     view: 'canvas',
     tool: 'select',
     strokeColor: '#1f2937',
+    textColor: '#1f2937',
+    colorTarget: 'shape', // shape | text
+    fontSize: 18,
     objects: [],
     connectors: [],
     selectedIds: new Set(),
@@ -605,54 +608,168 @@
   $$('.tool[data-tool]').forEach((btn) => {
     btn.addEventListener('click', () => setTool(btn.dataset.tool));
   });
+  function getActiveColor() {
+    return state.colorTarget === 'text' ? state.textColor : state.strokeColor;
+  }
+
   function syncColorUI(color) {
+    const c = color || getActiveColor();
     const stroke = $('#stroke-color');
     const palette = $('#palette-color');
-    if (stroke) stroke.value = color;
-    if (palette) palette.value = color;
+    if (stroke) stroke.value = c;
+    if (palette) palette.value = c;
     $$('#color-palette .swatch[data-color]').forEach((b) => {
-      b.classList.toggle('active', b.dataset.color.toLowerCase() === color.toLowerCase());
+      b.classList.toggle('active', b.dataset.color.toLowerCase() === String(c).toLowerCase());
+    });
+    $$('#color-palette .palette-mode').forEach((btn) => {
+      const on = btn.dataset.colorTarget === state.colorTarget;
+      btn.classList.toggle('active', on);
+      btn.setAttribute('aria-selected', on ? 'true' : 'false');
     });
   }
 
-  function setStrokeColor(color, { applyToSelection = true } = {}) {
+  function syncFontSizeUI(size) {
+    const input = $('#font-size-input');
+    if (input) input.value = String(size);
+  }
+
+  function clampFontSize(n) {
+    const v = Math.round(Number(n));
+    if (!Number.isFinite(v)) return state.fontSize || 18;
+    return Math.max(10, Math.min(72, v));
+  }
+
+  function themeTextColor() {
+    return getComputedStyle(document.documentElement).getPropertyValue('--text').trim() || '#e8eef7';
+  }
+
+  function objectTextColor(obj) {
+    if (!obj) return themeTextColor();
+    if (obj.textColor) return obj.textColor;
+    if (obj.type === 'text') return obj.stroke || themeTextColor();
+    if (obj.type === 'sticky') return '#1f2937';
+    return themeTextColor();
+  }
+
+  function objectFontSize(obj) {
+    if (obj && obj.fontSize != null && obj.fontSize !== '') return obj.fontSize;
+    if (!obj) return state.fontSize || 18;
+    if (obj.type === 'text') return 18;
+    if (obj.type === 'sticky') return 14;
+    if (obj.type === 'gateway' || obj.type === 'event') return 12;
+    if (obj.type === 'roomLink') return 14;
+    return 13;
+  }
+
+  const TEXT_COLOR_TYPES = new Set([
+    'rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event',
+    'sticky', 'text', 'roomLink',
+  ]);
+  const FONT_SIZE_TYPES = new Set([
+    'rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event',
+    'sticky', 'text', 'roomLink',
+  ]);
+
+  function setColorTarget(target) {
+    if (target !== 'shape' && target !== 'text') return;
+    state.colorTarget = target;
+    syncColorUI(getActiveColor());
+  }
+
+  function setActiveColor(color, { applyToSelection = true } = {}) {
     if (!color) return;
-    state.strokeColor = color;
+    if (state.colorTarget === 'text') state.textColor = color;
+    else state.strokeColor = color;
     syncColorUI(color);
+    if (!applyToSelection) return;
+    let changed = false;
+    if (state.colorTarget === 'text') {
+      for (const id of state.selectedIds) {
+        const obj = state.objects.find((o) => o.id === id);
+        if (!obj || !TEXT_COLOR_TYPES.has(obj.type)) continue;
+        obj.textColor = color;
+        if (obj.type === 'text') obj.stroke = color; // backward compat
+        emit('object-update', obj);
+        changed = true;
+      }
+    } else {
+      for (const id of state.selectedIds) {
+        const obj = state.objects.find((o) => o.id === id);
+        if (!obj) continue;
+        if (obj.type === 'sticky') {
+          obj.fill = color;
+        } else if (obj.type === 'text') {
+          // figure mode does not retarget pure text; keep stroke for drawing tools only
+          obj.stroke = color;
+          obj.textColor = color;
+        } else if ('stroke' in obj) {
+          obj.stroke = color;
+        } else {
+          continue;
+        }
+        emit('object-update', obj);
+        changed = true;
+      }
+      for (const id of state.selectedConnectorIds) {
+        const conn = state.connectors.find((c) => c.id === id);
+        if (!conn) continue;
+        conn.stroke = color;
+        emit('connector-update', conn);
+        changed = true;
+      }
+    }
+    if (changed) draw();
+  }
+
+  // Back-compat alias used nowhere else but keep name for clarity
+  function setStrokeColor(color, opts) {
+    setActiveColor(color, opts);
+  }
+
+  function setFontSize(size, { applyToSelection = true } = {}) {
+    const next = clampFontSize(size);
+    state.fontSize = next;
+    syncFontSizeUI(next);
     if (!applyToSelection) return;
     let changed = false;
     for (const id of state.selectedIds) {
       const obj = state.objects.find((o) => o.id === id);
-      if (!obj) continue;
-      if (obj.type === 'sticky') {
-        obj.fill = color;
-      } else if (obj.type === 'text') {
-        obj.stroke = color;
-      } else if ('stroke' in obj) {
-        obj.stroke = color;
-      }
+      if (!obj || !FONT_SIZE_TYPES.has(obj.type)) continue;
+      obj.fontSize = next;
       emit('object-update', obj);
-      changed = true;
-    }
-    for (const id of state.selectedConnectorIds) {
-      const conn = state.connectors.find((c) => c.id === id);
-      if (!conn) continue;
-      conn.stroke = color;
-      emit('connector-update', conn);
       changed = true;
     }
     if (changed) draw();
   }
 
-  $('#stroke-color').addEventListener('input', (e) => setStrokeColor(e.target.value));
+  $('#stroke-color').addEventListener('input', (e) => setActiveColor(e.target.value));
   const paletteColor = $('#palette-color');
   if (paletteColor) {
-    paletteColor.addEventListener('input', (e) => setStrokeColor(e.target.value));
+    paletteColor.addEventListener('input', (e) => setActiveColor(e.target.value));
   }
   $$('#color-palette .swatch[data-color]').forEach((btn) => {
-    btn.addEventListener('click', () => setStrokeColor(btn.dataset.color));
+    btn.addEventListener('click', () => setActiveColor(btn.dataset.color));
   });
-  syncColorUI(state.strokeColor);
+  $$('#color-palette .palette-mode').forEach((btn) => {
+    btn.addEventListener('click', () => setColorTarget(btn.dataset.colorTarget));
+  });
+  const fontSizeInput = $('#font-size-input');
+  if (fontSizeInput) {
+    fontSizeInput.addEventListener('change', (e) => setFontSize(e.target.value));
+    fontSizeInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        setFontSize(e.target.value);
+        e.target.blur();
+      }
+    });
+  }
+  const fontDec = $('#font-size-dec');
+  const fontInc = $('#font-size-inc');
+  if (fontDec) fontDec.addEventListener('click', () => setFontSize((state.fontSize || 18) - 1));
+  if (fontInc) fontInc.addEventListener('click', () => setFontSize((state.fontSize || 18) + 1));
+  syncColorUI(getActiveColor());
+  syncFontSizeUI(state.fontSize);
   $('#btn-delete').addEventListener('click', deleteSelected);
 
   function isTypingTarget(el) {
@@ -1121,8 +1238,8 @@
       if (obj.fill && obj.fill !== 'transparent') ctx.fill();
       ctx.stroke();
       if (obj.label) {
-        ctx.fillStyle = obj.stroke || '#1f2937';
-        ctx.font = '13px Segoe UI, system-ui, sans-serif';
+        ctx.fillStyle = objectTextColor(obj);
+        ctx.font = `${objectFontSize(obj)}px Segoe UI, system-ui, sans-serif`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(obj.label, x + w / 2, y + h / 2);
@@ -1139,8 +1256,8 @@
       if (obj.fill && obj.fill !== 'transparent') ctx.fill();
       ctx.stroke();
       if (obj.label) {
-        ctx.fillStyle = obj.stroke || '#1f2937';
-        ctx.font = '13px Segoe UI, system-ui, sans-serif';
+        ctx.fillStyle = objectTextColor(obj);
+        ctx.font = `${objectFontSize(obj)}px Segoe UI, system-ui, sans-serif`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(obj.label, cx, cy);
@@ -1156,8 +1273,8 @@
       if (obj.fill && obj.fill !== 'transparent') ctx.fill();
       ctx.stroke();
       if (obj.label) {
-        ctx.fillStyle = obj.stroke || '#1f2937';
-        ctx.font = '12px Segoe UI, system-ui, sans-serif';
+        ctx.fillStyle = objectTextColor(obj);
+        ctx.font = `${objectFontSize(obj)}px Segoe UI, system-ui, sans-serif`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(obj.label, x + w / 2, y + h / 2);
@@ -1173,8 +1290,8 @@
       if (obj.fill && obj.fill !== 'transparent') ctx.fill();
       ctx.stroke();
       if (obj.label) {
-        ctx.fillStyle = obj.stroke || '#1f2937';
-        ctx.font = '12px Segoe UI, system-ui, sans-serif';
+        ctx.fillStyle = objectTextColor(obj);
+        ctx.font = `${objectFontSize(obj)}px Segoe UI, system-ui, sans-serif`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(obj.label, x + w / 2, y + h / 2);
@@ -1216,8 +1333,9 @@
       const title = roomLinkTitle(obj);
       const rid = normalizeRoomCode(obj.roomId);
       ctx.textAlign = 'left';
-      ctx.fillStyle = textCol;
-      ctx.font = `600 ${Math.max(12, Math.min(14, h * 0.2))}px Segoe UI, system-ui, sans-serif`;
+      ctx.fillStyle = obj.textColor || textCol;
+      const titleFs = obj.fontSize != null ? objectFontSize(obj) : Math.max(12, Math.min(14, h * 0.2));
+      ctx.font = `600 ${titleFs}px Segoe UI, system-ui, sans-serif`;
       const titleY = y + 10 + badgeH + 16;
       const maxTitleW = w - 20;
       let drawnTitle = title;
@@ -1235,17 +1353,18 @@
     } else if (obj.type === 'sticky') {
       const w = obj.w || 160;
       const h = obj.h || 120;
+      const fs = objectFontSize(obj);
       ctx.fillStyle = obj.fill || '#fef08a';
       ctx.strokeStyle = 'rgba(0,0,0,.15)';
       drawRoundedRect(obj.x, obj.y, w, h, 4);
       ctx.fill();
       ctx.stroke();
-      ctx.fillStyle = '#1f2937';
-      ctx.font = '14px Segoe UI, system-ui, sans-serif';
-      wrapText(ctx, obj.text || '', obj.x + 10, obj.y + 24, w - 20, 18);
+      ctx.fillStyle = objectTextColor(obj);
+      ctx.font = `${fs}px Segoe UI, system-ui, sans-serif`;
+      wrapText(ctx, obj.text || '', obj.x + 10, obj.y + Math.max(18, fs + 6), w - 20, Math.round(fs * 1.25));
     } else if (obj.type === 'text') {
-      ctx.fillStyle = obj.stroke || getComputedStyle(document.documentElement).getPropertyValue('--text').trim() || '#e8eef7';
-      ctx.font = `${obj.fontSize || 18}px Segoe UI, system-ui, sans-serif`;
+      ctx.fillStyle = objectTextColor(obj);
+      ctx.font = `${objectFontSize(obj)}px Segoe UI, system-ui, sans-serif`;
       ctx.fillText(obj.text || '', obj.x, obj.y);
     }
 
@@ -1915,8 +2034,9 @@
     }
 
     if (state.tool === 'select') {
-      // Right mouse: rectangular marquee selection
-      if (e.button === 2) {
+      // Rectangular marquee: RMB anywhere, or LMB on empty space (below)
+      const rightBtn = e.button === 2 || (e.buttons & 2) === 2;
+      if (rightBtn) {
         e.preventDefault();
         try { canvasWrap.setPointerCapture(e.pointerId); } catch { /* ignore */ }
         state.marquee = {
@@ -1986,12 +2106,25 @@
           state.selectedConnectorIds.clear();
         }
         state.selectedConnectorIds.add(hitConn.id);
+        draw();
+        return;
       } else {
-        state.selectedIds.clear();
-        state.selectedConnectorIds.clear();
+        // Empty canvas: drag to marquee-select (LMB), like Miro/Figma
+        try { canvasWrap.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+        state.marquee = {
+          x1: world.x,
+          y1: world.y,
+          x2: world.x,
+          y2: world.y,
+          additive: !!e.shiftKey,
+        };
+        if (!e.shiftKey) {
+          state.selectedIds.clear();
+          state.selectedConnectorIds.clear();
+        }
+        draw();
+        return;
       }
-      draw();
-      return;
     }
 
     const shapeTools = ['rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event'];
@@ -2221,13 +2354,16 @@
     }
   }
 
+  function finishMarqueeIfAny() {
+    if (!state.marquee) return;
+    applyMarqueeSelection(state.marquee);
+    state.marquee = null;
+    draw();
+  }
+
   canvasWrap.addEventListener('pointerup', () => {
     flushPendingInlineEdit();
-    if (state.marquee) {
-      applyMarqueeSelection(state.marquee);
-      state.marquee = null;
-      draw();
-    }
+    finishMarqueeIfAny();
     if (state.panning) {
       state.panning = false;
       setTool(state.tool);
@@ -2266,6 +2402,17 @@
       setTool('select');
       draw();
     }
+  });
+
+  canvasWrap.addEventListener('pointercancel', () => {
+    finishMarqueeIfAny();
+    if (state.panning) {
+      state.panning = false;
+      setTool(state.tool);
+    }
+    state.dragging = null;
+    state.resizing = null;
+    state.drawing = null;
   });
 
   canvasWrap.addEventListener('pointerleave', () => {
