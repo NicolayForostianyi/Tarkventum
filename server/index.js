@@ -15,13 +15,22 @@ const DATA_DIR = path.join(__dirname, '..', 'data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const DMS_FILE = path.join(DATA_DIR, 'dms.json');
 const PERSONAL_KANBAN_FILE = path.join(DATA_DIR, 'personal-kanban.json');
+const AVATARS_DIR = path.join(DATA_DIR, 'avatars');
+const MAX_AVATAR_BYTES = 800 * 1024;
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: false } });
 
-app.use(express.json({ limit: '256kb' }));
+app.use(express.json({ limit: '1.5mb' }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
+app.use('/avatars', express.static(AVATARS_DIR, {
+  fallthrough: false,
+  maxAge: '1h',
+  setHeaders(res) {
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+  },
+}));
 app.get('/r/:roomId', (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
 });
@@ -49,6 +58,7 @@ const USER_COLORS = [
 // ---------- Persistence ----------
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (!fs.existsSync(AVATARS_DIR)) fs.mkdirSync(AVATARS_DIR, { recursive: true });
 }
 
 function loadJson(file, fallback) {
@@ -149,12 +159,42 @@ function findUserById(id) {
   return usersStore.users.find((x) => x.id === id) || null;
 }
 
+function detectImageExt(buf) {
+  if (!buf || buf.length < 12) return null;
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'png';
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return 'gif';
+  if (
+    buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46
+    && buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50
+  ) return 'webp';
+  return null;
+}
+
+function avatarUrlFor(u) {
+  if (!u || !u.avatarUpdatedAt || !u.avatarExt) return null;
+  return `/avatars/${u.id}.${u.avatarExt}?v=${u.avatarUpdatedAt}`;
+}
+
 function publicUser(u) {
   return {
     id: u.id,
     username: u.username,
     displayName: u.displayName || u.username,
+    avatarUrl: avatarUrlFor(u),
   };
+}
+
+function removeUserAvatarFiles(userId, keepExt) {
+  for (const ext of ['png', 'jpg', 'jpeg', 'webp', 'gif']) {
+    if (keepExt && ext === keepExt) continue;
+    const fp = path.join(AVATARS_DIR, `${userId}.${ext}`);
+    try {
+      if (fs.existsSync(fp)) fs.unlinkSync(fp);
+    } catch (err) {
+      console.error('avatar unlink', fp, err.message);
+    }
+  }
 }
 
 function signToken(user) {
@@ -317,6 +357,79 @@ app.post('/api/login', async (req, res) => {
 
 app.get('/api/me', authMiddleware, (req, res) => {
   res.json({ ok: true, user: publicUser(req.user) });
+});
+
+app.post('/api/me/avatar', authMiddleware, (req, res) => {
+  try {
+    const image = req.body?.image;
+    if (!image || typeof image !== 'string') {
+      return res.status(400).json({ ok: false, error: 'Нужно поле image (data URL)' });
+    }
+    const m = /^data:(image\/(png|jpeg|jpg|webp|gif));base64,([A-Za-z0-9+/=\s]+)$/i.exec(image.trim());
+    if (!m) {
+      return res.status(400).json({ ok: false, error: 'Допустимы только PNG, JPEG, WebP или GIF' });
+    }
+    const declared = m[2].toLowerCase() === 'jpg' ? 'jpeg' : m[2].toLowerCase();
+    const b64 = m[3].replace(/\s+/g, '');
+    let buf;
+    try {
+      buf = Buffer.from(b64, 'base64');
+    } catch {
+      return res.status(400).json({ ok: false, error: 'Не удалось декодировать изображение' });
+    }
+    if (!buf.length) {
+      return res.status(400).json({ ok: false, error: 'Пустое изображение' });
+    }
+    if (buf.length > MAX_AVATAR_BYTES) {
+      return res.status(400).json({ ok: false, error: 'Файл слишком большой (макс. ~800 КБ)' });
+    }
+    const detected = detectImageExt(buf);
+    if (!detected) {
+      return res.status(400).json({ ok: false, error: 'Файл не является допустимым изображением' });
+    }
+    // Map jpeg declaration to jpg file ext; detected already jpg/png/gif/webp
+    const ext = detected === 'jpg' ? 'jpg' : detected;
+    if (
+      (declared === 'png' && ext !== 'png')
+      || (declared === 'jpeg' && ext !== 'jpg')
+      || (declared === 'webp' && ext !== 'webp')
+      || (declared === 'gif' && ext !== 'gif')
+    ) {
+      // Still allow if magic matches a known image type; use detected
+    }
+
+    ensureDataDir();
+    const user = findUserById(req.user.id);
+    if (!user) return res.status(401).json({ ok: false, error: 'Требуется вход' });
+
+    removeUserAvatarFiles(user.id, ext);
+    const dest = path.join(AVATARS_DIR, `${user.id}.${ext}`);
+    fs.writeFileSync(dest, buf);
+
+    user.avatarExt = ext;
+    user.avatarUpdatedAt = Date.now();
+    saveUsersStore(usersStore);
+
+    res.json({ ok: true, user: publicUser(user) });
+  } catch (err) {
+    console.error('avatar upload', err);
+    res.status(500).json({ ok: false, error: 'Ошибка сервера' });
+  }
+});
+
+app.delete('/api/me/avatar', authMiddleware, (req, res) => {
+  try {
+    const user = findUserById(req.user.id);
+    if (!user) return res.status(401).json({ ok: false, error: 'Требуется вход' });
+    removeUserAvatarFiles(user.id, null);
+    delete user.avatarExt;
+    delete user.avatarUpdatedAt;
+    saveUsersStore(usersStore);
+    res.json({ ok: true, user: publicUser(user) });
+  } catch (err) {
+    console.error('avatar delete', err);
+    res.status(500).json({ ok: false, error: 'Ошибка сервера' });
+  }
 });
 
 app.get('/api/users', authMiddleware, (req, res) => {
