@@ -251,9 +251,7 @@ button { cursor: pointer; }
 .logo h1 { margin: 0; font-size: 1.6rem; letter-spacing: -.02em; }
 .logo-mark {
   width: 40px; height: 40px; border-radius: 12px;
-  display: grid; place-items: center;
-  background: linear-gradient(135deg, var(--primary), #8b5cf6);
-  font-weight: 800; color: #fff;
+  object-fit: cover; display: block; flex-shrink: 0;
 }
 .tagline { color: var(--muted); margin: 0 0 24px; line-height: 1.45; }
 .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
@@ -326,7 +324,15 @@ html[data-theme="white"] .btn.danger { color: #b91c1c; }
   padding: 0 14px; background: var(--bg-elev); border-bottom: 1px solid var(--border);
 }
 .topbar-left, .topbar-right { display: flex; align-items: center; gap: 10px; }
-.brand { font-weight: 700; letter-spacing: -.02em; }
+.brand {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-weight: 700; letter-spacing: -.02em;
+}
+.brand-logo {
+  width: 24px; height: 24px; border-radius: 6px;
+  object-fit: cover; display: block; flex-shrink: 0;
+}
+.brand-text { line-height: 1; }
 .room-badge {
   font-size: .8rem; color: var(--muted); background: var(--bg-soft);
   padding: 4px 8px; border-radius: 999px; border: 1px solid var(--border);
@@ -622,9 +628,36 @@ html[data-theme="white"] .due-overdue { color: #b91c1c; }
   margin: 0 0 16px; color: var(--muted); font-size: .9rem;
 }
 .user-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  line-height: 1;
   font-size: .8rem; color: var(--text); background: var(--bg-soft);
-  padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border);
-  max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 3px 10px 3px 3px; border-radius: 999px; border: 1px solid var(--border);
+  max-width: 160px; cursor: pointer; font-family: inherit;
+}
+.user-chip:hover { filter: brightness(1.08); }
+.user-chip-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 110px;
+  padding-right: 4px;
+}
+.user-avatar {
+  width: 26px; height: 26px; border-radius: 50%;
+  object-fit: cover; flex-shrink: 0; display: inline-block;
+  background: linear-gradient(135deg, var(--primary), #8b5cf6);
+  color: #fff; font-size: .7rem; font-weight: 700;
+  text-align: center; line-height: 26px;
+}
+.user-avatar.img-avatar {
+  background: var(--bg); border: 1px solid var(--border);
+  line-height: 0; overflow: hidden;
+}
+.user-avatar.img-avatar img {
+  width: 100%; height: 100%; object-fit: cover; display: block; border-radius: 50%;
+}
+.lobby-user-avatar {
+  width: 28px; height: 28px; line-height: 28px; font-size: .75rem;
+}
+.dm-user-avatar {
+  width: 22px; height: 22px; line-height: 22px; font-size: .65rem;
 }
 
 /* Side tabs (chat / DM) */
