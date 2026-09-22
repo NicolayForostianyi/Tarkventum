@@ -154,6 +154,7 @@ function normalizeBoardCard(card, board, fallbackColumnId) {
     title: String(card.title || 'Новая карточка').slice(0, 200),
     description: String(card.description || '').slice(0, 2000),
     dueDate: card.dueDate ? String(card.dueDate).slice(0, 32) : null,
+    linkedRoomId: card.linkedRoomId ? normalizeRoomId(card.linkedRoomId) : null,
     order: typeof card.order === 'number'
       ? card.order
       : board.cards.filter((c) => c.columnId === columnId).length,
@@ -507,6 +508,10 @@ app.get('/api/dms/:otherId', authMiddleware, (req, res) => {
 });
 
 // ---------- Rooms ----------
+function normalizeRoomId(raw) {
+  return String(raw || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 32);
+}
+
 function createRoom(id) {
   return {
     id,
@@ -561,6 +566,7 @@ function normalizeCard(card, room, fallbackColumnId) {
     title: String(card.title || 'Новая карточка').slice(0, 200),
     description: String(card.description || '').slice(0, 2000),
     dueDate: card.dueDate ? String(card.dueDate).slice(0, 32) : null,
+    linkedRoomId: card.linkedRoomId ? normalizeRoomId(card.linkedRoomId) : null,
     order: typeof card.order === 'number'
       ? card.order
       : room.cards.filter((c) => c.columnId === columnId).length,
@@ -613,7 +619,7 @@ io.on('connection', (socket) => {
         if (typeof ack === 'function') ack({ ok: false, error: 'Неверный код комнаты' });
         return;
       }
-      const id = roomId.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 32);
+      const id = normalizeRoomId(roomId);
       if (!id) {
         if (typeof ack === 'function') ack({ ok: false, error: 'Неверный код комнаты' });
         return;
@@ -673,6 +679,26 @@ io.on('connection', (socket) => {
       ? { x: payload.x, y: payload.y }
       : null;
     socket.to(currentRoom).emit('cursor-move', { id: userId, cursor: user.cursor });
+  });
+
+  socket.on('room-snapshot', ({ roomId } = {}, ack) => {
+    if (typeof ack !== 'function') return;
+    try {
+      const id = normalizeRoomId(roomId);
+      if (!id) {
+        ack({ ok: false, error: 'Неверный код комнаты' });
+        return;
+      }
+      const room = getOrCreateRoom(id);
+      ack({
+        ok: true,
+        roomId: id,
+        objects: JSON.parse(JSON.stringify(room.objects || [])),
+        connectors: JSON.parse(JSON.stringify(room.connectors || [])),
+      });
+    } catch (err) {
+      ack({ ok: false, error: (err && err.message) || 'Ошибка снимка комнаты' });
+    }
   });
 
   socket.on('object-add', (obj) => {
@@ -775,6 +801,9 @@ io.on('connection', (socket) => {
       dueDate: card.dueDate !== undefined
         ? (card.dueDate ? String(card.dueDate).slice(0, 32) : null)
         : prev.dueDate,
+      linkedRoomId: card.linkedRoomId !== undefined
+        ? (card.linkedRoomId ? normalizeRoomId(card.linkedRoomId) : null)
+        : (prev.linkedRoomId || null),
       columnId: card.columnId !== undefined ? card.columnId : prev.columnId,
       order: card.order !== undefined ? card.order : prev.order,
     };
@@ -906,6 +935,9 @@ io.on('connection', (socket) => {
       dueDate: card.dueDate !== undefined
         ? (card.dueDate ? String(card.dueDate).slice(0, 32) : null)
         : prev.dueDate,
+      linkedRoomId: card.linkedRoomId !== undefined
+        ? (card.linkedRoomId ? normalizeRoomId(card.linkedRoomId) : null)
+        : (prev.linkedRoomId || null),
       columnId: card.columnId !== undefined ? card.columnId : prev.columnId,
       order: card.order !== undefined ? card.order : prev.order,
     };
