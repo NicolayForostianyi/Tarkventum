@@ -2089,6 +2089,96 @@
     if (state.inlineEdit) commitInlineEdit();
   });
 
+  function expandRoomLinkToScheme() {
+    if (!state.editingRoomLinkId) {
+      toast('Ссылка не выбрана');
+      return;
+    }
+    const link = saveRoomLinkPanel() || state.objects.find((o) => o.id === state.editingRoomLinkId);
+    if (!link || link.type !== 'roomLink') {
+      toast('Ссылка не выбрана');
+      return;
+    }
+    const code = normalizeRoomCode(link.roomId);
+    if (!code) {
+      toast('Укажите код комнаты');
+      return;
+    }
+    const confirmText = `Развернуть комнату ${code} в текущую схему? Объекты комнаты будут скопированы на этот холст. Ссылка будет удалена. Продолжить?`;
+    if (!window.confirm(confirmText)) return;
+
+    emit('room-snapshot', { roomId: code }, (res) => {
+      if (!res || !res.ok) {
+        toast((res && res.error) || 'Не удалось получить комнату');
+        return;
+      }
+      const srcObjects = Array.isArray(res.objects) ? res.objects : [];
+      const srcConnectors = Array.isArray(res.connectors) ? res.connectors : [];
+      if (!srcObjects.length && !srcConnectors.length) {
+        toast('Комната пуста или не найдена');
+        return;
+      }
+
+      const ox = typeof link.x === 'number' ? link.x : 0;
+      const oy = typeof link.y === 'number' ? link.y : 0;
+      const idMap = new Map();
+      const newObjs = [];
+
+      for (const src of srcObjects) {
+        if (!src || !src.id) continue;
+        const orig = JSON.parse(JSON.stringify(src));
+        const copy = JSON.parse(JSON.stringify(src));
+        copy.id = uid('obj');
+        idMap.set(src.id, copy.id);
+        applyDelta(copy, orig, ox, oy);
+        newObjs.push(copy);
+      }
+
+      // Delete original roomLink shape (and its connectors)
+      const linkId = link.id;
+      state.objects = state.objects.filter((o) => o.id !== linkId);
+      state.connectors = state.connectors.filter(
+        (c) => c.fromId !== linkId && c.toId !== linkId
+      );
+      state.selectedIds.delete(linkId);
+      emit('object-delete', { ids: [linkId] });
+      closeRoomLinkPanel();
+
+      for (const obj of newObjs) {
+        state.objects.push(obj);
+        emit('object-add', obj);
+      }
+
+      for (const srcConn of srcConnectors) {
+        if (!srcConn) continue;
+        const fromId = idMap.get(srcConn.fromId);
+        const toId = idMap.get(srcConn.toId);
+        if (!fromId || !toId || fromId === toId) continue;
+        const conn = {
+          id: uid('conn'),
+          type: 'connector',
+          fromId,
+          toId,
+          stroke: srcConn.stroke || '#64748b',
+          strokeWidth: srcConn.strokeWidth || 2,
+          arrow: srcConn.arrow !== false,
+        };
+        if (!state.connectors.find((c) => c.id === conn.id)) {
+          state.connectors.push(conn);
+        }
+        emit('connector-add', conn);
+      }
+
+      state.selectedIds = new Set(newObjs.map((o) => o.id));
+      state.selectedConnectorIds.clear();
+      setTool('select');
+      draw();
+      toast(newObjs.length
+        ? `Развёрнуто: ${newObjs.length} объект(ов)`
+        : 'Схема развёрнута');
+    });
+  }
+
   $('#room-link-panel-close').addEventListener('click', () => {
     saveRoomLinkPanel();
     closeRoomLinkPanel();
@@ -2102,6 +2192,9 @@
   $('#room-link-open').addEventListener('click', () => {
     const obj = saveRoomLinkPanel();
     if (obj) navigateRoomLink(obj);
+  });
+  $('#room-link-expand').addEventListener('click', () => {
+    expandRoomLinkToScheme();
   });
   $('#room-link-id').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
@@ -2878,10 +2971,14 @@
         const dueHtml = card.dueDate
           ? `<span class="kanban-card-due due-${urg || 'ok'}">${escapeHtml(formatDue(card.dueDate))}</span>`
           : '';
+        const roomCode = normalizeRoomCode(card.linkedRoomId);
+        const roomHtml = roomCode
+          ? `<button type="button" class="kanban-card-room" data-room="${escapeHtml(roomCode)}" title="Открыть комнату">🔗 ${escapeHtml(roomCode)}</button>`
+          : '';
         cardEl.innerHTML = `
           <h4>${escapeHtml(card.title)}</h4>
           ${card.description ? `<p>${escapeHtml(card.description)}</p>` : ''}
-          ${dueHtml}
+          ${roomHtml}${dueHtml}
         `;
         cardEl.addEventListener('dragstart', (ev) => {
           cardEl.classList.add('dragging');
@@ -2890,6 +2987,20 @@
         });
         cardEl.addEventListener('dragend', () => cardEl.classList.remove('dragging'));
         cardEl.addEventListener('click', () => openCardPanel(card.id));
+        const roomChip = $('.kanban-card-room', cardEl);
+        if (roomChip) {
+          roomChip.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            const code = normalizeRoomCode(roomChip.dataset.room);
+            if (!code) return;
+            if (code === state.roomId) {
+              toast('Уже в этой комнате');
+              return;
+            }
+            toast(`Переход в ${code}`);
+            enterRoom(code);
+          });
+        }
         list.appendChild(cardEl);
       }
       list.addEventListener('dragover', (ev) => {
@@ -2961,6 +3072,9 @@
     if (document.activeElement !== $('#card-title')) $('#card-title').value = card.title;
     if (document.activeElement !== $('#card-desc')) $('#card-desc').value = card.description || '';
     if (document.activeElement !== $('#card-due')) $('#card-due').value = card.dueDate || '';
+    if (document.activeElement !== $('#card-room-link')) {
+      $('#card-room-link').value = card.linkedRoomId || '';
+    }
   }
 
   function openCardPanel(id) {
@@ -2970,6 +3084,7 @@
     $('#card-title').value = card.title;
     $('#card-desc').value = card.description || '';
     $('#card-due').value = card.dueDate || '';
+    $('#card-room-link').value = card.linkedRoomId || '';
     cardPanel.classList.remove('hidden');
   }
 
@@ -2985,6 +3100,7 @@
       title: $('#card-title').value.trim() || 'Без названия',
       description: $('#card-desc').value,
       dueDate: $('#card-due').value || null,
+      linkedRoomId: normalizeRoomCode($('#card-room-link').value) || null,
     });
   }
 
@@ -3013,6 +3129,24 @@
   $('#card-desc').addEventListener('input', scheduleCardSync);
   $('#card-due').addEventListener('change', () => {
     saveCardPanel();
+  });
+  $('#card-room-link').addEventListener('input', scheduleCardSync);
+  $('#card-room-link').addEventListener('change', () => {
+    saveCardPanel();
+  });
+  $('#card-open-room').addEventListener('click', () => {
+    const code = normalizeRoomCode($('#card-room-link').value);
+    if (!code) {
+      toast('Укажите код комнаты');
+      return;
+    }
+    if (code === state.roomId) {
+      toast('Уже в этой комнате');
+      return;
+    }
+    saveCardPanel();
+    toast(`Переход в ${code}`);
+    enterRoom(code);
   });
 
   // ---------- Chat ----------
