@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Tarkventum — доска и Канбан</title>
   <link rel="icon" href="/favicon.png" type="image/png" />
-  <link rel="stylesheet" href="/css/styles.css?v=20260922c" />
+  <link rel="stylesheet" href="/css/styles.css?v=20260922d" />
 </head>
 <body>
   <!-- Auth overlay -->
@@ -202,6 +202,7 @@
                 <div class="spacer"></div>
                 <button id="room-link-save" class="btn primary" type="button">Сохранить</button>
               </div>
+              <button id="room-link-expand" class="btn ghost" type="button" style="width:100%;margin-top:8px">Развернуть в схему</button>
               <p class="room-link-hint">Двойной клик по фигуре — открыть комнату. Alt+двойной клик — изменить.</p>
             </div>
             <div id="color-palette" class="color-palette" title="Цвет">
@@ -268,6 +269,11 @@
             <span>Срок</span>
             <input id="card-due" type="date" />
           </label>
+          <label class="field">
+            <span>Ссылка на комнату</span>
+            <input id="card-room-link" type="text" maxlength="32" placeholder="код комнаты" />
+          </label>
+          <button id="card-open-room" class="btn ghost small" type="button">Открыть комнату</button>
           <div class="modal-actions">
             <button id="card-delete-btn" class="btn danger" type="button">Удалить</button>
             <div class="spacer"></div>
@@ -332,6 +338,6 @@
   <div id="toast" class="toast hidden"></div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/js/app.js?v=20260922c"></script>
+  <script src="/js/app.js?v=20260922d"></script>
 </body>
 </html>
