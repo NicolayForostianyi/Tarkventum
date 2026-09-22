@@ -718,6 +718,13 @@
       connectorHint.classList.remove('hidden');
       connectorHint.textContent = 'Выберите фигуру-источник, затем фигуру-цель';
     }
+    if (tool === 'text' || tool === 'sticky') setColorTarget('text');
+    else if (
+      tool === 'pen' || tool === 'line' || tool === 'arrow' || tool === 'roomLink' ||
+      ['rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event'].includes(tool)
+    ) {
+      setColorTarget('shape');
+    }
   }
   $$('.tool[data-tool]').forEach((btn) => {
     btn.addEventListener('click', () => setTool(btn.dataset.tool));
@@ -783,6 +790,35 @@
     'rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event',
     'sticky', 'text', 'roomLink',
   ]);
+
+
+  function isTextPrimaryObject(obj) {
+    return !!(obj && (obj.type === 'text' || obj.type === 'sticky'));
+  }
+
+  /** Auto-pick palette mode from selection: text/sticky → text color, shapes → figure color. */
+  function syncColorTargetFromSelection() {
+    const objs = [...state.selectedIds]
+      .map((id) => state.objects.find((o) => o.id === id))
+      .filter(Boolean);
+    if (!objs.length) return;
+
+    const target = objs.every(isTextPrimaryObject) ? 'text' : 'shape';
+    state.colorTarget = target;
+
+    if (objs.length === 1) {
+      const o = objs[0];
+      if (target === 'text') {
+        state.textColor = objectTextColor(o);
+      } else if (o.type === 'sticky') {
+        state.strokeColor = o.fill || state.strokeColor;
+      } else if (o.stroke) {
+        state.strokeColor = o.stroke;
+      }
+      syncFontSizeUI(objectFontSize(o));
+    }
+    syncColorUI();
+  }
 
   function setColorTarget(target) {
     if (target !== 'shape' && target !== 'text') return;
@@ -1922,6 +1958,10 @@
     if (obj.type !== 'text' && obj.type !== 'sticky' && !['task', 'gateway', 'event', 'rect', 'square', 'circle', 'ellipse'].includes(obj.type)) {
       return;
     }
+    setColorTarget('text');
+    state.textColor = objectTextColor(obj);
+    syncFontSizeUI(objectFontSize(obj));
+    syncColorUI(state.textColor);
     cancelInlineEdit(true);
     const b = boundsOf(obj);
     if (!b) return;
@@ -2119,6 +2159,7 @@
       if (!state.connectorFromId) {
         state.connectorFromId = hit.id;
         state.selectedIds = new Set([hit.id]);
+        syncColorTargetFromSelection();
         connectorHint.textContent = 'Теперь выберите фигуру-цель';
         draw();
         return;
@@ -2208,6 +2249,7 @@
           state.selectedConnectorIds.clear();
         }
         state.selectedIds.add(hit.id);
+        syncColorTargetFromSelection();
         state.dragging = {
           ids: [...state.selectedIds],
           start: world,
@@ -2306,6 +2348,7 @@
       state.objects.push(obj);
       emit('object-add', obj);
       state.selectedIds = new Set([obj.id]);
+      syncColorTargetFromSelection();
       setTool('select');
       draw();
       openRoomLinkPanel(obj);
@@ -2328,6 +2371,7 @@
       state.objects.push(obj);
       emit('object-add', obj);
       state.selectedIds = new Set([obj.id]);
+      syncColorTargetFromSelection();
       setTool('select');
       draw();
       queueInlineEdit(obj);
@@ -2350,6 +2394,7 @@
       state.objects.push(obj);
       emit('object-add', obj);
       state.selectedIds = new Set([obj.id]);
+      syncColorTargetFromSelection();
       setTool('select');
       draw();
       queueInlineEdit(obj);
@@ -2480,6 +2525,7 @@
     if (!state.marquee) return;
     applyMarqueeSelection(state.marquee);
     state.marquee = null;
+    syncColorTargetFromSelection();
     draw();
   }
 
@@ -2521,6 +2567,7 @@
       state.objects.push(obj);
       emit('object-add', obj);
       state.selectedIds = new Set([obj.id]);
+      syncColorTargetFromSelection();
       setTool('select');
       draw();
     }
