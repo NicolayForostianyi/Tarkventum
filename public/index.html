@@ -4,16 +4,16 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Tarkventum — доска и Канбан</title>
-  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="/css/styles.css?v=20260921d" />
+  <link rel="icon" href="/favicon.png" type="image/png" />
+  <link rel="stylesheet" href="/css/styles.css?v=20260922a" />
 </head>
 <body>
   <!-- Auth overlay -->
   <div id="auth-screen" class="lobby">
     <div class="lobby-card auth-card">
       <div class="logo">
-        <span class="logo-mark">T</span>
-        <h1>Tarkventum</h1>
+        <img class="logo-mark" src="/logo-mark.png" alt="" />
+        <h1>arkventum</h1>
       </div>
       <p class="tagline">Войдите или зарегистрируйтесь, чтобы пользоваться доской и личными сообщениями</p>
 
@@ -63,11 +63,14 @@
   <div id="lobby" class="lobby hidden">
     <div class="lobby-card">
       <div class="logo">
-        <span class="logo-mark">T</span>
-        <h1>Tarkventum</h1>
+        <img class="logo-mark" src="/logo-mark.png" alt="" />
+        <h1>arkventum</h1>
       </div>
       <p class="tagline">Совместная доска, диаграммы и Канбан в реальном времени</p>
-      <p class="auth-user-line">Вы вошли как <strong id="lobby-username"></strong>
+      <p class="auth-user-line">
+        <span class="lobby-user-avatar user-avatar" id="lobby-user-avatar" hidden></span>
+        Вы вошли как <strong id="lobby-username"></strong>
+        <button id="btn-avatar-lobby" class="btn ghost small" type="button" title="Сменить аватар">Аватар</button>
         <button id="btn-logout-lobby" class="btn ghost small" type="button">Выйти из аккаунта</button>
       </p>
       <label class="field">
@@ -107,7 +110,7 @@
 
     <header class="topbar">
       <div class="topbar-left">
-        <span class="brand">Tarkventum</span>
+        <span class="brand"><img class="brand-logo" src="/logo-mark.png" alt="" /><span class="brand-text">arkventum</span></span>
         <span class="room-badge" id="room-badge"></span>
         <button id="btn-copy-link" class="btn ghost small" type="button" title="Скопировать ссылку">Ссылка</button>
       </div>
@@ -129,7 +132,11 @@
           <option value="pink">Розовая</option>
           <option value="gold">Золотая</option>
         </select>
-        <span class="user-chip" id="user-chip" title=""></span>
+        <button type="button" class="user-chip" id="user-chip" title="Нажмите, чтобы сменить аватар">
+          <span class="user-avatar" id="user-chip-avatar" hidden></span>
+          <span class="user-chip-name" id="user-chip-name"></span>
+        </button>
+        <input type="file" id="avatar-file-input" accept="image/*" hidden />
         <div id="presence" class="presence"></div>
         <button id="btn-leave" class="btn ghost small" type="button">К комнатам</button>
         <button id="btn-logout" class="btn ghost small" type="button">Выйти</button>
@@ -325,6 +332,6 @@
   <div id="toast" class="toast hidden"></div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/js/app.js?v=20260921d"></script>
+  <script src="/js/app.js?v=20260922a"></script>
 </body>
 </html>
