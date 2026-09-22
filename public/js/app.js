@@ -109,6 +109,7 @@
     editingRoomLinkId: null,
     tabs: [], // { roomId }
     joining: false,
+    lastPointerWorld: null,
   };
 
   // ---------- DOM ----------
@@ -1251,7 +1252,7 @@
   }
 
   // ---------- Geometry helpers ----------
-  const SHAPE_TYPES = new Set(['rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event', 'sticky', 'roomLink']);
+  const SHAPE_TYPES = new Set(['rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event', 'sticky', 'roomLink', 'image']);
 
   function centerOf(obj) {
     const b = boundsOf(obj);
@@ -1362,6 +1363,21 @@
     ctx.moveTo(x2, y2);
     ctx.lineTo(x2 - len * Math.cos(ang + 0.4), y2 - len * Math.sin(ang + 0.4));
     ctx.stroke();
+  }
+
+  const imageCache = new Map(); // src -> HTMLImageElement
+
+  function getCachedImage(src) {
+    if (!src) return null;
+    let img = imageCache.get(src);
+    if (img) return img;
+    img = new Image();
+    img.decoding = 'async';
+    img.onload = () => { if (typeof draw === 'function') draw(); };
+    img.onerror = () => { if (typeof draw === 'function') draw(); };
+    img.src = src;
+    imageCache.set(src, img);
+    return img;
   }
 
   function drawObject(obj, { selected = false, hovered = false } = {}) {
@@ -1500,6 +1516,21 @@
       ctx.fillText(sub, x + 10, titleY + 16);
       ctx.textAlign = 'start';
       ctx.textBaseline = 'alphabetic';
+    } else if (obj.type === 'image') {
+      const x = Math.min(obj.x, obj.x + obj.w);
+      const y = Math.min(obj.y, obj.y + obj.h);
+      const w = Math.abs(obj.w) || 1;
+      const h = Math.abs(obj.h) || 1;
+      const img = getCachedImage(obj.src);
+      if (img && img.complete && img.naturalWidth > 0) {
+        ctx.drawImage(img, x, y, w, h);
+      } else {
+        ctx.fillStyle = 'rgba(148,163,184,0.35)';
+        ctx.fillRect(x, y, w, h);
+        ctx.strokeStyle = 'rgba(100,116,139,0.7)';
+        ctx.lineWidth = 1 / state.camera.scale;
+        ctx.strokeRect(x, y, w, h);
+      }
     } else if (obj.type === 'sticky') {
       const w = obj.w || 160;
       const h = obj.h || 120;
@@ -2122,6 +2153,11 @@
 
   canvasWrap.addEventListener('pointerdown', (e) => {
     if (state.view !== 'canvas') return;
+    {
+      const _pt = getLocalPoint(e);
+      const _w = worldFromScreen(_pt.x, _pt.y);
+      state.lastPointerWorld = { x: _w.x, y: _w.y };
+    }
     if (e.target === inlineEditEl || inlineEditEl.contains(e.target)) return;
     if (roomLinkPanel.contains(e.target)) return;
     const paletteEl = $('#color-palette');
@@ -2404,6 +2440,7 @@
   canvasWrap.addEventListener('pointermove', (e) => {
     const pt = getLocalPoint(e);
     const world = worldFromScreen(pt.x, pt.y);
+    state.lastPointerWorld = { x: world.x, y: world.y };
     sendCursor(world.x, world.y);
 
     if (state.panning) {
@@ -2590,6 +2627,175 @@
     state.hoverConnectorId = null;
     state._connectorPreview = null;
     draw();
+  });
+
+  // ---------- Canvas images (drop / paste) ----------
+  function resizeCanvasImageDataUrl(file, maxEdge = 1920) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error('read'));
+      reader.onload = () => {
+        const img = new Image();
+        img.onerror = () => reject(new Error('img'));
+        img.onload = () => {
+          let w = img.naturalWidth || img.width || 1;
+          let h = img.naturalHeight || img.height || 1;
+          const naturalW = w;
+          const naturalH = h;
+          if (w > maxEdge || h > maxEdge) {
+            const scale = Math.min(maxEdge / w, maxEdge / h);
+            w = Math.max(1, Math.round(w * scale));
+            h = Math.max(1, Math.round(h * scale));
+          }
+          const c = document.createElement('canvas');
+          c.width = w;
+          c.height = h;
+          const cctx = c.getContext('2d');
+          cctx.drawImage(img, 0, 0, w, h);
+          let type = (file && file.type) || 'image/png';
+          if (type === 'image/jpg') type = 'image/jpeg';
+          if (type === 'image/gif') type = 'image/png'; // canvas flattens animated GIF
+          if (!/^image\/(png|jpeg|webp)$/i.test(type)) type = 'image/png';
+          const quality = (type === 'image/jpeg' || type === 'image/webp') ? 0.9 : undefined;
+          resolve({
+            dataUrl: c.toDataURL(type, quality),
+            naturalW,
+            naturalH,
+            w,
+            h,
+          });
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function defaultImageBoardSize(naturalW, naturalH) {
+    const nw = Math.max(1, naturalW || 1);
+    const nh = Math.max(1, naturalH || 1);
+    const maxDim = 400;
+    const scale = Math.min(maxDim / nw, maxDim / nh, 1);
+    return {
+      w: Math.max(1, Math.round(nw * scale)),
+      h: Math.max(1, Math.round(nh * scale)),
+    };
+  }
+
+  function viewportCenterWorld() {
+    const rect = canvasWrap.getBoundingClientRect();
+    return worldFromScreen(rect.width / 2, rect.height / 2);
+  }
+
+  async function placeImageFromFile(file, worldX, worldY) {
+    if (!file || !state.token || !state.roomId) return false;
+    if (!file.type || !file.type.startsWith('image/')) {
+      toast('Выберите файл изображения');
+      return false;
+    }
+    try {
+      const prepared = await resizeCanvasImageDataUrl(file, 1920);
+      if (prepared.dataUrl.length > 4.2e6) {
+        toast('Изображение слишком большое');
+        return false;
+      }
+      const { data } = await api('/api/canvas-image', {
+        method: 'POST',
+        body: JSON.stringify({ image: prepared.dataUrl }),
+      });
+      if (!data || !data.ok || !data.url) {
+        toast((data && data.error) || 'Не удалось загрузить картинку');
+        return false;
+      }
+      const size = defaultImageBoardSize(prepared.w, prepared.h);
+      const obj = {
+        id: uid('obj'),
+        type: 'image',
+        x: worldX - size.w / 2,
+        y: worldY - size.h / 2,
+        w: size.w,
+        h: size.h,
+        src: data.url,
+        naturalW: prepared.naturalW,
+        naturalH: prepared.naturalH,
+      };
+      state.objects.push(obj);
+      emit('object-add', obj);
+      state.selectedIds = new Set([obj.id]);
+      state.selectedConnectorIds.clear();
+      syncColorTargetFromSelection();
+      setTool('select');
+      getCachedImage(obj.src);
+      draw();
+      toast('Картинка добавлена');
+      return true;
+    } catch (err) {
+      console.error('placeImageFromFile', err);
+      toast('Не удалось загрузить картинку');
+      return false;
+    }
+  }
+
+  function extractImageFilesFromDataTransfer(dt) {
+    if (!dt) return [];
+    const out = [];
+    if (dt.files && dt.files.length) {
+      for (const f of dt.files) {
+        if (f && f.type && f.type.startsWith('image/')) out.push(f);
+      }
+    }
+    if (!out.length && dt.items) {
+      for (const item of dt.items) {
+        if (item.kind === 'file' && item.type && item.type.startsWith('image/')) {
+          const f = item.getAsFile();
+          if (f) out.push(f);
+        }
+      }
+    }
+    return out;
+  }
+
+  ['dragenter', 'dragover'].forEach((evt) => {
+    canvasWrap.addEventListener(evt, (e) => {
+      if (state.view !== 'canvas') return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+    });
+  });
+
+  canvasWrap.addEventListener('drop', async (e) => {
+    if (state.view !== 'canvas') return;
+    e.preventDefault();
+    e.stopPropagation();
+    const files = extractImageFilesFromDataTransfer(e.dataTransfer);
+    if (!files.length) return;
+    const pt = getLocalPoint(e);
+    const world = worldFromScreen(pt.x, pt.y);
+    // Place sequentially so selection ends on the last one
+    for (const file of files) {
+      await placeImageFromFile(file, world.x, world.y);
+    }
+  });
+
+  // Prevent browser from navigating away if drop misses canvas but lands on app shell
+  document.addEventListener('dragover', (e) => {
+    if (state.view === 'canvas') e.preventDefault();
+  });
+  document.addEventListener('drop', (e) => {
+    if (state.view === 'canvas') e.preventDefault();
+  });
+
+  window.addEventListener('paste', async (e) => {
+    if (state.view !== 'canvas') return;
+    if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return;
+    const files = extractImageFilesFromDataTransfer(e.clipboardData);
+    if (!files.length) return;
+    e.preventDefault();
+    const pos = state.lastPointerWorld || viewportCenterWorld();
+    for (const file of files) {
+      await placeImageFromFile(file, pos.x, pos.y);
+    }
   });
 
   // ---------- Kanban ----------
