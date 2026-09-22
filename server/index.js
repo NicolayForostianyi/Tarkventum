@@ -16,15 +16,24 @@ const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const DMS_FILE = path.join(DATA_DIR, 'dms.json');
 const PERSONAL_KANBAN_FILE = path.join(DATA_DIR, 'personal-kanban.json');
 const AVATARS_DIR = path.join(DATA_DIR, 'avatars');
+const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 const MAX_AVATAR_BYTES = 800 * 1024;
+const MAX_CANVAS_IMAGE_BYTES = 3 * 1024 * 1024;
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: false } });
 
-app.use(express.json({ limit: '1.5mb' }));
+app.use(express.json({ limit: '4mb' }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 app.use('/avatars', express.static(AVATARS_DIR, {
+  fallthrough: false,
+  maxAge: '1h',
+  setHeaders(res) {
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+  },
+}));
+app.use('/uploads', express.static(UPLOADS_DIR, {
   fallthrough: false,
   maxAge: '1h',
   setHeaders(res) {
@@ -59,6 +68,7 @@ const USER_COLORS = [
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   if (!fs.existsSync(AVATARS_DIR)) fs.mkdirSync(AVATARS_DIR, { recursive: true });
+  if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
 
 function loadJson(file, fallback) {
@@ -428,6 +438,47 @@ app.delete('/api/me/avatar', authMiddleware, (req, res) => {
     res.json({ ok: true, user: publicUser(user) });
   } catch (err) {
     console.error('avatar delete', err);
+    res.status(500).json({ ok: false, error: 'Ошибка сервера' });
+  }
+});
+
+app.post('/api/canvas-image', authMiddleware, (req, res) => {
+  try {
+    const image = req.body?.image;
+    if (!image || typeof image !== 'string') {
+      return res.status(400).json({ ok: false, error: 'Нужно поле image (data URL)' });
+    }
+    const m = /^data:(image\/(png|jpeg|jpg|webp|gif));base64,([A-Za-z0-9+/=\s]+)$/i.exec(image.trim());
+    if (!m) {
+      return res.status(400).json({ ok: false, error: 'Допустимы только PNG, JPEG, WebP или GIF' });
+    }
+    const b64 = m[3].replace(/\s+/g, '');
+    let buf;
+    try {
+      buf = Buffer.from(b64, 'base64');
+    } catch {
+      return res.status(400).json({ ok: false, error: 'Не удалось декодировать изображение' });
+    }
+    if (!buf.length) {
+      return res.status(400).json({ ok: false, error: 'Пустое изображение' });
+    }
+    if (buf.length > MAX_CANVAS_IMAGE_BYTES) {
+      return res.status(400).json({ ok: false, error: 'Файл слишком большой (макс. ~3 МБ)' });
+    }
+    const detected = detectImageExt(buf);
+    if (!detected) {
+      return res.status(400).json({ ok: false, error: 'Файл не является допустимым изображением' });
+    }
+    const ext = detected === 'jpg' ? 'jpg' : detected;
+    ensureDataDir();
+    const id = genId('img');
+    const filename = `${id}.${ext}`;
+    const dest = path.join(UPLOADS_DIR, filename);
+    fs.writeFileSync(dest, buf);
+    const url = `/uploads/${filename}`;
+    res.json({ ok: true, url });
+  } catch (err) {
+    console.error('canvas-image upload', err);
     res.status(500).json({ ok: false, error: 'Ошибка сервера' });
   }
 });
