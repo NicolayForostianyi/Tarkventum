@@ -194,14 +194,115 @@
     return (state.account.displayName || state.account.username || '').slice(0, 32);
   }
 
+  function accountInitial() {
+    const name = accountDisplayName() || (state.account && state.account.username) || '?';
+    return name.trim().charAt(0).toUpperCase() || '?';
+  }
+
+  function fillAvatarEl(el, avatarUrl, initial) {
+    if (!el) return;
+    el.hidden = false;
+    if (avatarUrl) {
+      el.classList.add('img-avatar');
+      el.textContent = '';
+      let img = el.querySelector('img');
+      if (!img) {
+        img = document.createElement('img');
+        img.alt = '';
+        el.appendChild(img);
+      }
+      img.src = avatarUrl;
+    } else {
+      el.classList.remove('img-avatar');
+      el.innerHTML = '';
+      el.textContent = initial || '?';
+    }
+  }
+
   function updateUserChrome() {
     const name = accountDisplayName();
     const lobbyName = $('#lobby-username');
     if (lobbyName) lobbyName.textContent = name;
+    const initial = accountInitial();
+    const avatarUrl = state.account && state.account.avatarUrl ? state.account.avatarUrl : null;
+
     const chip = $('#user-chip');
+    const chipName = $('#user-chip-name');
+    const chipAvatar = $('#user-chip-avatar');
     if (chip) {
-      chip.textContent = name;
-      chip.title = state.account ? `@${state.account.username}` : '';
+      chip.title = state.account
+        ? `@${state.account.username} — нажмите, чтобы сменить аватар`
+        : '';
+    }
+    if (chipName) chipName.textContent = name;
+    fillAvatarEl(chipAvatar, avatarUrl, initial);
+
+    const lobbyAvatar = $('#lobby-user-avatar');
+    fillAvatarEl(lobbyAvatar, avatarUrl, initial);
+  }
+
+  function openAvatarPicker() {
+    const input = $('#avatar-file-input');
+    if (input) input.click();
+  }
+
+  function resizeImageToDataUrl(file, maxSize = 256) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error('read'));
+      reader.onload = () => {
+        const img = new Image();
+        img.onerror = () => reject(new Error('img'));
+        img.onload = () => {
+          let w = img.width;
+          let h = img.height;
+          if (w > maxSize || h > maxSize) {
+            const scale = Math.min(maxSize / w, maxSize / h);
+            w = Math.round(w * scale);
+            h = Math.round(h * scale);
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, w, h);
+          const type = (file.type === 'image/png') ? 'image/png' : 'image/jpeg';
+          const quality = type === 'image/jpeg' ? 0.85 : undefined;
+          resolve(canvas.toDataURL(type, quality));
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function uploadAvatarFile(file) {
+    if (!file || !state.token) return;
+    if (!file.type || !file.type.startsWith('image/')) {
+      toast('Выберите файл изображения');
+      return;
+    }
+    try {
+      const dataUrl = await resizeImageToDataUrl(file, 256);
+      // Rough size check on base64 payload
+      if (dataUrl.length > 1.1e6) {
+        toast('Изображение слишком большое');
+        return;
+      }
+      const { data } = await api('/api/me/avatar', {
+        method: 'POST',
+        body: JSON.stringify({ image: dataUrl }),
+      });
+      if (!data || !data.ok) {
+        toast((data && data.error) || 'Не удалось загрузить аватар');
+        return;
+      }
+      state.account = data.user;
+      localStorage.setItem(USER_KEY, JSON.stringify(data.user));
+      updateUserChrome();
+      toast('Аватар обновлён');
+    } catch {
+      toast('Не удалось загрузить аватар');
     }
   }
 
@@ -317,6 +418,19 @@
 
   $('#btn-logout').addEventListener('click', logout);
   $('#btn-logout-lobby').addEventListener('click', logout);
+
+  const avatarInput = $('#avatar-file-input');
+  if (avatarInput) {
+    avatarInput.addEventListener('change', () => {
+      const file = avatarInput.files && avatarInput.files[0];
+      avatarInput.value = '';
+      if (file) uploadAvatarFile(file);
+    });
+  }
+  const userChip = $('#user-chip');
+  if (userChip) userChip.addEventListener('click', openAvatarPicker);
+  const btnAvatarLobby = $('#btn-avatar-lobby');
+  if (btnAvatarLobby) btnAvatarLobby.addEventListener('click', openAvatarPicker);
 
   // ---------- Lobby ----------
   function showError(msg) {
@@ -2744,8 +2858,13 @@
       const unread = u.unread > 0
         ? `<span class="dm-user-unread">${u.unread > 99 ? '99+' : u.unread}</span>`
         : '';
+      const initial = escapeHtml(((u.displayName || u.username || '?').trim().charAt(0) || '?').toUpperCase());
+      const avatarHtml = u.avatarUrl
+        ? `<span class="user-avatar dm-user-avatar img-avatar"><img src="${escapeHtml(u.avatarUrl)}" alt="" /></span>`
+        : `<span class="user-avatar dm-user-avatar">${initial}</span>`;
       btn.innerHTML = `
         <span class="dm-user-dot${u.online ? ' online' : ''}" title="${u.online ? 'в сети' : 'не в сети'}"></span>
+        ${avatarHtml}
         <span class="dm-user-name">${label}</span>
         ${unread}
       `;
