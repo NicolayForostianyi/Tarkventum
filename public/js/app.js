@@ -16,6 +16,176 @@
     toast._t = setTimeout(() => el.classList.add('hidden'), 2200);
   }
 
+  // ---------- Undo / Redo (local client history) ----------
+  const HISTORY_LIMIT = 80;
+  const CLIPBOARD_KEY = 'tv_object_clipboard';
+  let historyPast = [];
+  let historyFuture = [];
+  let historyLocked = false;
+  let objectClipboard = null;
+
+  function cloneBoard() {
+    return {
+      objects: JSON.parse(JSON.stringify(state.objects || [])),
+      connectors: JSON.parse(JSON.stringify(state.connectors || [])),
+    };
+  }
+
+  function pushHistory() {
+    if (historyLocked || !state.roomId) return;
+    try {
+      historyPast.push(cloneBoard());
+      if (historyPast.length > HISTORY_LIMIT) historyPast.shift();
+      historyFuture = [];
+    } catch (err) {
+      console.warn('pushHistory', err);
+    }
+  }
+
+  function clearHistory() {
+    historyPast = [];
+    historyFuture = [];
+  }
+
+  function applyBoardSnapshot(snap) {
+    if (!snap) return;
+    historyLocked = true;
+    const prevObjs = state.objects.slice();
+    const prevConns = state.connectors.slice();
+    const nextObjs = Array.isArray(snap.objects) ? snap.objects : [];
+    const nextConns = Array.isArray(snap.connectors) ? snap.connectors : [];
+    const prevObjMap = new Map(prevObjs.map((o) => [o.id, o]));
+    const nextObjMap = new Map(nextObjs.map((o) => [o.id, o]));
+    const prevConnMap = new Map(prevConns.map((c) => [c.id, c]));
+    const nextConnMap = new Map(nextConns.map((c) => [c.id, c]));
+
+    const delObjIds = [...prevObjMap.keys()].filter((id) => !nextObjMap.has(id));
+    const delConnIds = [...prevConnMap.keys()].filter((id) => !nextConnMap.has(id));
+    if (delObjIds.length) emit('object-delete', { ids: delObjIds });
+    if (delConnIds.length) emit('connector-delete', { ids: delConnIds });
+
+    for (const obj of nextObjs) {
+      const prev = prevObjMap.get(obj.id);
+      if (!prev) emit('object-add', obj);
+      else if (JSON.stringify(prev) !== JSON.stringify(obj)) emit('object-update', obj);
+    }
+    for (const conn of nextConns) {
+      const prev = prevConnMap.get(conn.id);
+      if (!prev) emit('connector-add', conn);
+      else if (JSON.stringify(prev) !== JSON.stringify(conn)) emit('connector-update', conn);
+    }
+
+    state.objects = nextObjs;
+    state.connectors = nextConns;
+    state.selectedIds.clear();
+    state.selectedConnectorIds.clear();
+    historyLocked = false;
+    draw();
+  }
+
+  function undo() {
+    if (!historyPast.length || state.view !== 'canvas') return;
+    historyFuture.push(cloneBoard());
+    applyBoardSnapshot(historyPast.pop());
+  }
+
+  function redo() {
+    if (!historyFuture.length || state.view !== 'canvas') return;
+    historyPast.push(cloneBoard());
+    applyBoardSnapshot(historyFuture.pop());
+  }
+
+  function saveClipboard(payload) {
+    objectClipboard = payload;
+    try { sessionStorage.setItem(CLIPBOARD_KEY, JSON.stringify(payload)); } catch { /* ignore */ }
+  }
+
+  function loadClipboard() {
+    if (objectClipboard && objectClipboard.objects && objectClipboard.objects.length) return objectClipboard;
+    try {
+      const raw = sessionStorage.getItem(CLIPBOARD_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (parsed && Array.isArray(parsed.objects) && parsed.objects.length) {
+        objectClipboard = parsed;
+        return parsed;
+      }
+    } catch { /* ignore */ }
+    return null;
+  }
+
+  function copySelectedObjects({ cut = false } = {}) {
+    if (state.view !== 'canvas' || !state.roomId) return false;
+    const ids = [...state.selectedIds];
+    if (!ids.length) return false;
+    const idSet = new Set(ids);
+    const objects = state.objects.filter((o) => idSet.has(o.id)).map((o) => JSON.parse(JSON.stringify(o)));
+    const connectors = state.connectors
+      .filter((c) => idSet.has(c.fromId) && idSet.has(c.toId))
+      .map((c) => JSON.parse(JSON.stringify(c)));
+    saveClipboard({ objects, connectors, at: Date.now() });
+    if (cut) {
+      pushHistory();
+      deleteSelected();
+      toast('Вырезано');
+    } else {
+      toast('Скопировано');
+    }
+    return true;
+  }
+
+  function pasteClipboardObjects() {
+    if (state.view !== 'canvas' || !state.roomId) return false;
+    const clip = loadClipboard();
+    if (!clip || !clip.objects || !clip.objects.length) return false;
+    pushHistory();
+    const idMap = new Map();
+    for (const src of clip.objects) {
+      if (src && src.id) idMap.set(src.id, uid('obj'));
+    }
+    const offset = 28;
+    const newIds = [];
+    for (const src of clip.objects) {
+      if (!src || !src.id) continue;
+      const copy = JSON.parse(JSON.stringify(src));
+      const oldId = src.id;
+      copy.id = idMap.get(oldId) || uid('obj');
+      if (typeof copy.x === 'number') copy.x += offset;
+      if (typeof copy.y === 'number') copy.y += offset;
+      if (typeof copy.x1 === 'number') {
+        copy.x1 += offset; copy.y1 += offset;
+        copy.x2 += offset; copy.y2 += offset;
+      }
+      if (Array.isArray(copy.points)) {
+        copy.points = copy.points.map((p) => ({ x: p.x + offset, y: p.y + offset }));
+      }
+      if (copy.parentId) copy.parentId = idMap.get(copy.parentId) || null;
+      // roomLink / cardLink: keep target refs, new object id
+      ensureDbColumns(copy);
+      state.objects.push(copy);
+      emit('object-add', copy);
+      newIds.push(copy.id);
+    }
+    for (const src of (clip.connectors || [])) {
+      if (!src) continue;
+      const fromId = idMap.get(src.fromId);
+      const toId = idMap.get(src.toId);
+      if (!fromId || !toId) continue;
+      const copy = JSON.parse(JSON.stringify(src));
+      copy.id = uid('conn');
+      copy.fromId = fromId;
+      copy.toId = toId;
+      state.connectors.push(copy);
+      emit('connector-add', copy);
+    }
+    state.selectedIds = new Set(newIds);
+    state.selectedConnectorIds.clear();
+    syncColorTargetFromSelection();
+    draw();
+    toast('Вставлено');
+    return true;
+  }
+
   function randomRoomCode() {
     const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
     let s = '';
@@ -504,6 +674,7 @@
     state.userName = res.name;
     state.userColor = res.color;
     state.roomId = res.roomId;
+    clearHistory();
     const s = res.state || {};
     state.objects = s.objects || [];
     state.connectors = s.connectors || [];
@@ -694,6 +865,7 @@
   $('#btn-new-tab').addEventListener('click', () => {
     $('#open-room-input').value = '';
     $('#modal-open-room').classList.remove('hidden');
+    refreshPublicRooms();
     $('#open-room-input').focus();
   });
   $('#open-room-cancel').addEventListener('click', () => {
@@ -831,6 +1003,68 @@
   $$('.tool[data-tool]').forEach((btn) => {
     btn.addEventListener('click', () => setTool(btn.dataset.tool));
   });
+
+  function closeToolPopovers() {
+    $$('.tool-popover, [data-group-panel]').forEach((p) => p.classList.add('hidden'));
+    $$('[data-group-toggle]').forEach((b) => b.setAttribute('aria-expanded', 'false'));
+  }
+  function closeToolDrawer() {
+    const drawer = $('#toolbar-drawer');
+    const btn = $('#btn-tool-drawer');
+    if (drawer) { drawer.classList.add('hidden'); drawer.setAttribute('aria-hidden', 'true'); }
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+  }
+  function closeDbColumnsPanel() {
+    const panel = $('#db-columns-panel');
+    if (panel) panel.classList.add('hidden');
+    if (typeof dbColumnsEditId !== 'undefined') dbColumnsEditId = null;
+  }
+  function isAppAdminUser() {
+    return !!(state.account && state.account.isAdmin);
+  }
+
+  $$('[data-group-toggle]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const group = btn.getAttribute('data-group-toggle');
+      const panel = document.querySelector(`[data-group-panel="${group}"]`);
+      const wasOpen = panel && !panel.classList.contains('hidden');
+      closeToolPopovers();
+      closeToolDrawer();
+      if (panel && !wasOpen) {
+        panel.classList.remove('hidden');
+        btn.setAttribute('aria-expanded', 'true');
+      }
+    });
+  });
+  {
+    const btnDrawer = $('#btn-tool-drawer');
+    if (btnDrawer && !btnDrawer._tvBound) {
+      btnDrawer._tvBound = true;
+      btnDrawer.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const drawer = $('#toolbar-drawer');
+        if (!drawer) return;
+        const opening = drawer.classList.contains('hidden');
+        closeToolPopovers();
+        if (opening) {
+          drawer.classList.remove('hidden');
+          drawer.setAttribute('aria-hidden', 'false');
+          btnDrawer.setAttribute('aria-expanded', 'true');
+        } else closeToolDrawer();
+      });
+    }
+    const btnClose = $('#btn-tool-drawer-close');
+    if (btnClose && !btnClose._tvBound) {
+      btnClose._tvBound = true;
+      btnClose.addEventListener('click', () => closeToolDrawer());
+    }
+  }
+  document.addEventListener('click', (e) => {
+    if (e.target.closest('[data-group-panel]') || e.target.closest('[data-group-toggle]') || e.target.closest('#toolbar-drawer') || e.target.closest('#btn-tool-drawer')) return;
+    closeToolPopovers();
+  });
+
   function getActiveColor() {
     return state.colorTarget === 'text' ? state.textColor : state.strokeColor;
   }
@@ -940,6 +1174,7 @@
     else state.strokeColor = color;
     syncColorUI(color);
     if (!applyToSelection) return;
+    if (state.selectedIds.size || state.selectedConnectorIds.size) pushHistory();
     let changed = false;
     if (state.colorTarget === 'text') {
       for (const id of state.selectedIds) {
@@ -989,6 +1224,7 @@
     state.fontSize = next;
     syncFontSizeUI(next);
     if (!applyToSelection) return;
+    if (state.selectedIds.size) pushHistory();
     let changed = false;
     for (const id of state.selectedIds) {
       const obj = state.objects.find((o) => o.id === id);
@@ -1132,6 +1368,15 @@
       if (e.key === 'Escape' && state.inlineEdit) {
         e.preventDefault();
         cancelInlineEdit(true);
+        setTool('select');
+        return;
+      }
+      // Db columns panel is a typing target — Esc closes + select
+      const dbPanel = $('#db-columns-panel');
+      if (e.key === 'Escape' && dbPanel && !dbPanel.classList.contains('hidden')) {
+        e.preventDefault();
+        closeDbColumnsPanel();
+        setTool('select');
         return;
       }
       // If focus left the editor, put it back and apply the key so typing still works
@@ -1167,20 +1412,73 @@
       e.preventDefault();
       deleteSelected();
     }
+    // Undo / Redo / Clipboard
+    if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+      const k = e.key.toLowerCase();
+      if (k === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+        return;
+      }
+      if (k === 'y' || (k === 'z' && e.shiftKey)) {
+        e.preventDefault();
+        redo();
+        return;
+      }
+      if (k === 'c') {
+        e.preventDefault();
+        copySelectedObjects();
+        return;
+      }
+      if (k === 'x') {
+        e.preventDefault();
+        copySelectedObjects({ cut: true });
+        return;
+      }
+      if (k === 'v') {
+        e.preventDefault();
+        pasteClipboardObjects();
+        return;
+      }
+    }
     if (e.key === 'Escape') {
-      if (!roomLinkPanel.classList.contains('hidden')) {
+      e.preventDefault();
+      // Close panels / editors first
+      const dbPanel = $('#db-columns-panel');
+      if (dbPanel && !dbPanel.classList.contains('hidden')) {
+        closeDbColumnsPanel();
+        setTool('select');
+        return;
+      }
+      if (roomLinkPanel && !roomLinkPanel.classList.contains('hidden')) {
         closeRoomLinkPanel();
+        setTool('select');
         return;
       }
       if (cardLinkPanel && !cardLinkPanel.classList.contains('hidden')) {
         closeCardLinkPanel();
+        setTool('select');
         return;
       }
+      if (state.inlineEdit) {
+        cancelInlineEdit(true);
+        setTool('select');
+        return;
+      }
+      closeToolPopovers();
+      closeToolDrawer();
+      // Cancel in-progress drawing / gestures
+      state.drawing = null;
+      state.dragging = null;
+      state.resizing = null;
+      state.rotating = null;
+      state.marquee = null;
       state.connectorFromId = null;
       state.selectedIds.clear();
       state.selectedConnectorIds.clear();
-      if (state.tool === 'connector') connectorHint.textContent = 'Выберите фигуру-источник, затем фигуру-цель';
+      setTool('select');
       draw();
+      return;
     }
     if (e.key === 'Enter' && state.view === 'canvas' && state.selectedIds.size === 1) {
       const sel = state.objects.find((o) => o.id === [...state.selectedIds][0]);
@@ -1504,8 +1802,7 @@
   // ---------- Geometry helpers ----------
   const SHAPE_TYPES = new Set([
     'rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event', 'sticky', 'roomLink', 'cardLink', 'image',
-    'dbTable', 'dbView', 'dbSchema', 'dbDatabase', 'dbIndex', 'dbProcedure', 'dbTrigger', 'dbEnum',
-  ]);
+    'dbTable', 'dbView', 'dbSchema', 'dbDatabase', 'dbIndex', 'dbProcedure', 'dbTrigger', 'dbEnum',, 'text']);
 
   function objectRotationRad(obj) {
     const deg = (obj && obj.rotation) || 0;
@@ -1656,6 +1953,176 @@
   }
 
 
+
+  const DB_COLUMN_TYPES = ['dbTable', 'dbView', 'dbEnum'];
+
+  function parseAttrsToColumns(raw) {
+    const lines = String(raw || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    return lines.map((line) => {
+      // formats: "id  PK", "name varchar", "id:uuid PK"
+      let name = line;
+      let type = '';
+      let pk = false;
+      let unique = false;
+      let nullable = true;
+      if (/\bPK\b/i.test(line)) { pk = true; nullable = false; }
+      if (/\bUQ\b|\bUNIQUE\b/i.test(line)) unique = true;
+      if (/\bNOT\s*NULL\b/i.test(line)) nullable = false;
+      const cleaned = line.replace(/\b(PK|FK|UQ|UNIQUE|NOT\s*NULL)\b/gi, '').trim();
+      const m = cleaned.match(/^([A-Za-z0-9_]+)\s*[:\s]\s*([A-Za-z0-9_()\s]+)$/) || cleaned.match(/^([A-Za-z0-9_]+)$/);
+      if (m) {
+        name = m[1];
+        type = (m[2] || (pk ? 'uuid' : 'text')).trim();
+      }
+      return { name, type: type || 'text', pk, unique, nullable };
+    });
+  }
+
+
+  let dbColumnsEditId = null;
+  function openDbColumnsPanel(obj) {
+    if (!obj || !DB_COLUMN_TYPES.includes(obj.type)) return;
+    ensureDbColumns(obj);
+    dbColumnsEditId = obj.id;
+    const panel = $('#db-columns-panel');
+    if (!panel) return;
+    panel.classList.remove('hidden');
+    const title = $('#db-columns-title');
+    if (title) title.textContent = (DB_META[obj.type] && DB_META[obj.type].title) || 'Колонки';
+    const nameInput = $('#db-columns-name');
+    if (nameInput) nameInput.value = obj.label || obj.name || '';
+    const body = $('#db-columns-body');
+    if (!body) return;
+    const redraw = () => {
+      const o = state.objects.find((x) => x.id === dbColumnsEditId);
+      if (!o) return;
+      ensureDbColumns(o);
+      body.innerHTML = '';
+      o.columns.forEach((col, idx) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td><input data-f="name" data-i="${idx}" value="${escapeHtml(col.name || '')}"/></td>
+          <td><input data-f="type" data-i="${idx}" value="${escapeHtml(col.type || '')}"/></td>
+          <td><button type="button" data-del="${idx}">✕</button></td>`;
+        body.appendChild(tr);
+      });
+      body.querySelectorAll('input').forEach((inp) => {
+        inp.addEventListener('change', () => {
+          const o2 = state.objects.find((x) => x.id === dbColumnsEditId);
+          if (!o2) return;
+          pushHistory();
+          ensureDbColumns(o2);
+          const i = Number(inp.dataset.i);
+          o2.columns[i][inp.dataset.f] = inp.value;
+          ensureDbColumns(o2);
+          fitDbHeight(o2);
+          emit('object-update', o2);
+          draw();
+        });
+        inp.addEventListener('keydown', (e) => {
+          if (e.key !== 'Enter') return;
+          e.preventDefault();
+          inp.dispatchEvent(new Event('change'));
+          const i = Number(inp.dataset.i);
+          const f = inp.dataset.f;
+          const o2 = state.objects.find((x) => x.id === dbColumnsEditId);
+          if (!o2) return;
+          if (e.shiftKey) {
+            if (f === 'type') body.querySelector(`input[data-f="name"][data-i="${i}"]`)?.focus();
+            else if (i > 0) body.querySelector(`input[data-f="type"][data-i="${i - 1}"]`)?.focus();
+            return;
+          }
+          if (f === 'name') body.querySelector(`input[data-f="type"][data-i="${i}"]`)?.focus();
+          else {
+            ensureDbColumns(o2);
+            if (i >= o2.columns.length - 1) {
+              pushHistory();
+              o2.columns.push({ name: '', type: 'text', pk: false, unique: false, nullable: true });
+              fitDbHeight(o2);
+              emit('object-update', o2);
+              redraw();
+              draw();
+            }
+            body.querySelector(`input[data-f="name"][data-i="${i + 1}"]`)?.focus();
+          }
+        });
+      });
+      body.querySelectorAll('[data-del]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const o2 = state.objects.find((x) => x.id === dbColumnsEditId);
+          if (!o2) return;
+          pushHistory();
+          ensureDbColumns(o2);
+          o2.columns.splice(Number(btn.getAttribute('data-del')), 1);
+          fitDbHeight(o2);
+          emit('object-update', o2);
+          redraw();
+          draw();
+        });
+      });
+    };
+    redraw();
+  }
+  $('#db-columns-close')?.addEventListener('click', () => { closeDbColumnsPanel(); setTool('select'); });
+  $('#db-columns-add')?.addEventListener('click', () => {
+    const o = state.objects.find((x) => x.id === dbColumnsEditId);
+    if (!o) return;
+    pushHistory();
+    ensureDbColumns(o);
+    o.columns.push({ name: '', type: 'text', pk: false, unique: false, nullable: true });
+    fitDbHeight(o);
+    emit('object-update', o);
+    openDbColumnsPanel(o);
+    draw();
+  });
+  $('#db-columns-save')?.addEventListener('click', () => {
+    const o = state.objects.find((x) => x.id === dbColumnsEditId);
+    if (o) {
+      const nameInput = $('#db-columns-name');
+      if (nameInput) {
+        pushHistory();
+        o.label = nameInput.value.trim();
+        ensureDbColumns(o);
+        fitDbHeight(o);
+        emit('object-update', o);
+        draw();
+      }
+    }
+    closeDbColumnsPanel();
+    setTool('select');
+  });
+
+  function ensureDbColumns(obj) {
+    if (!obj || !DB_TYPES.has(obj.type)) return obj;
+    if (!Array.isArray(obj.columns)) {
+      const raw = obj.text || obj.attrs || '';
+      if (raw) obj.columns = parseAttrsToColumns(raw);
+      else if (DB_COLUMN_TYPES.includes(obj.type)) {
+        const meta = DB_META[obj.type];
+        obj.columns = parseAttrsToColumns(meta && meta.defaultAttrs);
+      } else {
+        obj.columns = [];
+      }
+    }
+    // keep text in sync for older clients
+    obj.text = (obj.columns || []).map((c) => {
+      let s = `${c.name || ''}${c.type ? ' ' + c.type : ''}`;
+      if (c.pk) s += ' PK';
+      if (c.unique) s += ' UQ';
+      return s.trim();
+    }).join('\n');
+    return obj;
+  }
+
+  function fitDbHeight(obj) {
+    if (!obj || !DB_TYPES.has(obj.type)) return;
+    ensureDbColumns(obj);
+    const rows = (obj.columns && obj.columns.length) || 0;
+    const headerH = 28;
+    const rowH = 22;
+    const minH = obj.type === 'dbSchema' || obj.type === 'dbDatabase' ? 80 : 100;
+    obj.h = Math.max(minH, headerH + 16 + rows * rowH + 8);
+  }
+
   const DB_META = {
     dbTable: { title: 'Таблица', header: '#0ea5e9', badge: 'TABLE', defaultLabel: 'table_name', defaultAttrs: 'id  PK\ncreated_at' },
     dbView: { title: 'Представление', header: '#8b5cf6', badge: 'VIEW', defaultLabel: 'view_name', defaultAttrs: 'col1\ncol2' },
@@ -1737,23 +2204,31 @@
     if (drawn !== name && drawn.length > 1) drawn = drawn.slice(0, -1) + '…';
     ctx.fillText(drawn, x + 8 + badgeW, y + headerH / 2);
 
-    // body attrs
-    const lines = dbAttrLines(obj);
-    if (lines.length && obj.type !== 'dbSchema' && obj.type !== 'dbDatabase') {
+    // body: name | type columns
+    ensureDbColumns(obj);
+    const cols = Array.isArray(obj.columns) ? obj.columns : [];
+    if (cols.length && obj.type !== 'dbSchema' && obj.type !== 'dbDatabase') {
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
       const bodyFs = Math.max(10, Math.min(12, (obj.fontSize != null ? objectFontSize(obj) : 12) - 1));
       const lh = Math.round(bodyFs * 1.35);
       let yy = y + headerH + 8;
-      for (const line of lines) {
+      const splitX = x + Math.floor(w * 0.55);
+      for (const col of cols) {
         if (yy + lh > y + h - 4) break;
-        const isKey = /\bPK\b|\bFK\b|🔑|🔗/i.test(line);
+        const isKey = !!(col.pk || col.unique);
         ctx.fillStyle = isKey ? primary : textCol;
         ctx.font = `${isKey ? '600 ' : ''}${bodyFs}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
-        let t = line;
-        while (t.length > 1 && ctx.measureText(t).width > w - 20) t = t.slice(0, -1);
-        if (t !== line && t.length > 1) t = t.slice(0, -1) + '…';
-        ctx.fillText(t || ' ', x + 10, yy);
+        let n = String(col.name || '');
+        while (n.length > 1 && ctx.measureText(n).width > splitX - x - 14) n = n.slice(0, -1);
+        if (n !== String(col.name || '') && n.length > 1) n = n.slice(0, -1) + '…';
+        ctx.fillText(n || ' ', x + 10, yy);
+        ctx.fillStyle = muted;
+        ctx.font = `${bodyFs}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
+        let tp = String(col.type || '');
+        while (tp.length > 1 && ctx.measureText(tp).width > x + w - splitX - 12) tp = tp.slice(0, -1);
+        if (tp !== String(col.type || '') && tp.length > 1) tp = tp.slice(0, -1) + '…';
+        ctx.fillText(tp || ' ', splitX, yy);
         yy += lh;
       }
     } else if (obj.type === 'dbSchema' || obj.type === 'dbDatabase') {
@@ -1988,9 +2463,16 @@
       ctx.font = `${fs}px Segoe UI, system-ui, sans-serif`;
       wrapText(ctx, obj.text || '', obj.x + 10, obj.y + Math.max(18, fs + 6), w - 20, Math.round(fs * 1.25));
     } else if (obj.type === 'text') {
+      const fs = objectFontSize(obj);
+      const tw = Math.max(40, obj.w || 160);
+      const th = Math.max(fs * 1.2, obj.h || fs * 1.4);
+      if (obj.w == null) obj.w = tw;
+      if (obj.h == null) obj.h = th;
       ctx.fillStyle = objectTextColor(obj);
-      ctx.font = `${objectFontSize(obj)}px Segoe UI, system-ui, sans-serif`;
-      ctx.fillText(obj.text || '', obj.x, obj.y);
+      ctx.font = `${fs}px Segoe UI, system-ui, sans-serif`;
+      ctx.textBaseline = 'top';
+      wrapText(ctx, obj.text || '', obj.x, obj.y, tw, Math.round(fs * 1.25));
+      ctx.textBaseline = 'alphabetic';
     }
 
     if (selected || hovered) {
@@ -2012,7 +2494,7 @@
           ctx.setLineDash([6 / state.camera.scale, 4 / state.camera.scale]);
           ctx.strokeRect(b.x - 4, b.y - 4, b.w + 8, b.h + 8);
           ctx.setLineDash([]);
-          if (SHAPE_TYPES.has(obj.type) && obj.type !== 'text') {
+          if (SHAPE_TYPES.has(obj.type) || obj.type === 'text') {
             const hs = 6 / state.camera.scale;
             const corners = [
               [b.x, b.y], [b.x + b.w, b.y],
@@ -2105,11 +2587,9 @@
     if (obj.type === 'sticky') return { x: obj.x, y: obj.y, w: obj.w || 160, h: obj.h || 120 };
     if (obj.type === 'text') {
       const fs = objectFontSize(obj);
-      ctx.save();
-      ctx.font = `${fs}px Segoe UI, system-ui, sans-serif`;
-      const w = ctx.measureText(obj.text || ' ').width;
-      ctx.restore();
-      return { x: obj.x, y: obj.y - fs, w: Math.max(w, 40), h: fs * 1.2 };
+      const w = Math.max(40, obj.w || 160);
+      const h = Math.max(fs * 1.2, obj.h || fs * 1.4);
+      return { x: obj.x, y: obj.y, w, h };
     }
     return null;
   }
@@ -2255,7 +2735,7 @@
   }
 
   function hitResizeHandle(obj, wx, wy) {
-    if (!SHAPE_TYPES.has(obj.type) || obj.type === 'text') return null;
+    if (!SHAPE_TYPES.has(obj.type) && obj.type !== 'text') return null;
     const b = boundsOfUnrotated(obj);
     if (!b) return null;
     let lx = wx, ly = wy;
@@ -2366,6 +2846,7 @@
     let objIds = [...state.selectedIds];
     const connIds = [...state.selectedConnectorIds];
     if (!objIds.length && !connIds.length) return;
+    pushHistory();
 
     if (objIds.length) {
       const cardLinkIds = objIds.filter((id) => {
@@ -2706,6 +3187,7 @@
 
   function startInlineEditAttrs(obj) {
     if (!obj || !DB_TYPES.has(obj.type)) return;
+    if (DB_COLUMN_TYPES.includes(obj.type)) { openDbColumnsPanel(obj); return; }
     cancelInlineEdit(true);
     const b = boundsOfUnrotated(obj) || boundsOf(obj);
     if (!b) return;
@@ -3187,8 +3669,8 @@
           stroke: state.textColor,
           textColor: state.textColor,
           fontSize: state.fontSize || 18,
-          w: 120,
-          h: 24,
+          w: 200,
+          h: 28,
           rotation: 0,
         };
         state.objects.push(obj);
@@ -3377,8 +3859,8 @@
         stroke: state.textColor,
         textColor: state.textColor,
         fontSize: state.fontSize || 18,
-        w: 120,
-        h: 24,
+        w: 200,
+        h: 28,
       };
       state.objects.push(obj);
       emit('object-add', obj);
@@ -3603,6 +4085,7 @@
       }
       obj = normalizeShape(obj);
       if (obj.rotation == null && ROTATABLE_TYPES.has(obj.type)) obj.rotation = 0;
+      pushHistory();
       state.objects.push(obj);
       emit('object-add', obj);
       state.selectedIds = new Set([obj.id]);
@@ -4518,6 +5001,91 @@
   }
 
   // ---------- Public rooms list ----------
+
+  function worldToScreen(x, y) {
+    return {
+      x: (x + state.camera.x) * state.camera.scale,
+      y: (y + state.camera.y) * state.camera.scale,
+    };
+  }
+
+  function computeSchemeBounds() {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, any = false;
+    const consider = (b) => {
+      if (!b) return;
+      any = true;
+      minX = Math.min(minX, b.x); minY = Math.min(minY, b.y);
+      maxX = Math.max(maxX, b.x + b.w); maxY = Math.max(maxY, b.y + b.h);
+    };
+    for (const o of state.objects) consider(boundsOf(o));
+    if (!any) return { x: -100, y: -100, w: 800, h: 600 };
+    const pad = 48;
+    return { x: minX - pad, y: minY - pad, w: Math.max(120, maxX - minX + pad * 2), h: Math.max(120, maxY - minY + pad * 2) };
+  }
+
+  function exportSchemePng() {
+    if (!state.objects.length) { toast('Схема пуста'); return null; }
+    const b = computeSchemeBounds();
+    const scale = 2;
+    const prev = { x: state.camera.x, y: state.camera.y, scale: state.camera.scale };
+    const rect = canvasWrap.getBoundingClientRect();
+    const fit = Math.min(rect.width / b.w, rect.height / b.h) * 0.9;
+    state.camera.scale = Math.max(0.05, fit);
+    state.camera.x = -b.x + (rect.width / state.camera.scale - b.w) / 2;
+    state.camera.y = -b.y + (rect.height / state.camera.scale - b.h) / 2;
+    draw();
+    const dpr = window.devicePixelRatio || 1;
+    const tl = worldToScreen(b.x, b.y);
+    const br = worldToScreen(b.x + b.w, b.y + b.h);
+    const sx = Math.max(0, tl.x * dpr);
+    const sy = Math.max(0, tl.y * dpr);
+    const sw = Math.max(1, (br.x - tl.x) * dpr);
+    const sh = Math.max(1, (br.y - tl.y) * dpr);
+    const off = document.createElement('canvas');
+    off.width = Math.ceil(b.w * scale);
+    off.height = Math.ceil(b.h * scale);
+    const c = off.getContext('2d');
+    const bg = getComputedStyle(document.documentElement).getPropertyValue('--canvas-bg').trim() || '#0b1220';
+    c.fillStyle = bg;
+    c.fillRect(0, 0, off.width, off.height);
+    try {
+      c.drawImage(canvas, sx, sy, sw, sh, 0, 0, off.width, off.height);
+    } catch (err) {
+      console.warn(err);
+      toast('Не удалось экспортировать схему');
+      state.camera.x = prev.x; state.camera.y = prev.y; state.camera.scale = prev.scale;
+      draw();
+      return null;
+    }
+    state.camera.x = prev.x; state.camera.y = prev.y; state.camera.scale = prev.scale;
+    draw();
+    const a = document.createElement('a');
+    a.download = `tarkventum-scheme-${state.roomId || 'board'}.png`;
+    a.href = off.toDataURL('image/png');
+    a.click();
+    toast('Схема сохранена (PNG)');
+    return off;
+  }
+
+  function exportSchemePdf() {
+    const off = exportSchemePng();
+    if (!off) return;
+    const dataUrl = off.toDataURL('image/jpeg', 0.92);
+    const w = window.open('', '_blank');
+    if (!w) { toast('Разрешите всплывающие окна для печати/PDF'); return; }
+    w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Схема ${escapeHtml(state.roomId || '')}</title>
+      <style>@page{margin:12mm}html,body{margin:0;background:#111}img{width:100%;height:auto;display:block}</style></head>
+      <body><img src="${dataUrl}" onload="setTimeout(()=>window.print(),250)"/></body></html>`);
+    w.document.close();
+    toast('Печать → «Сохранить как PDF»');
+  }
+
+  function onExportSchemeMenu() {
+    const asPdf = confirm('Экспорт схемы холста\\n\\nОК — скачать PNG\\nОтмена — печать / PDF');
+    if (asPdf) exportSchemePng();
+    else exportSchemePdf();
+  }
+
   function renderPublicRoomsList(rooms) {
     const lobbyList = $('#public-rooms-list');
     const sideList = $('#public-rooms-side');
@@ -4543,6 +5111,32 @@
     };
     renderInto(lobbyList);
     renderInto(sideList);
+    renderInto($('#public-rooms-modal'));
+  }
+
+
+  function showLobbyPublicRooms(show) {
+    const block = $('#lobby-public-rooms');
+    if (!block) return;
+    block.classList.toggle('hidden', !show);
+    if (show) refreshPublicRooms();
+  }
+  if (typeof roomInput !== 'undefined' && roomInput) {
+    roomInput.addEventListener('focus', () => showLobbyPublicRooms(true));
+    roomInput.addEventListener('input', () => {
+      showLobbyPublicRooms(!!roomInput.value.trim() || document.activeElement === roomInput);
+      const q = roomInput.value.trim().toLowerCase();
+      $$('#public-rooms-list .public-room-item').forEach((el) => {
+        const id = (el.querySelector('.public-room-id')?.textContent || el.textContent || '').toLowerCase();
+        el.style.display = !q || id.includes(q) ? '' : 'none';
+      });
+    });
+    roomInput.addEventListener('blur', () => {
+      setTimeout(() => {
+        if (document.activeElement && document.activeElement.closest && document.activeElement.closest('#lobby-public-rooms')) return;
+        if (!roomInput.value.trim()) showLobbyPublicRooms(false);
+      }, 150);
+    });
   }
 
   function refreshPublicRooms() {
@@ -4562,8 +5156,12 @@
     const delBtn = $('#btn-delete-room');
     const memBtn = $('#btn-members');
     const isOwner = state.myRoomRole === 'owner' || (state.account && state.roomOwnerId === state.account.id);
-    if (delBtn) delBtn.classList.toggle('hidden', !isOwner);
-    if (memBtn) memBtn.classList.toggle('hidden', state.roomVisibility !== 'private' && !isOwner);
+    const isPublic = state.roomVisibility !== 'private';
+    const admin = isAppAdminUser();
+    // Public/open rooms: only app admin. Private: owner or app admin.
+    const canDelete = isPublic ? admin : (isOwner || admin);
+    if (delBtn) delBtn.classList.toggle('hidden', !canDelete);
+    if (memBtn) memBtn.classList.toggle('hidden', state.roomVisibility !== 'private' && !isOwner && !admin);
     renderMembersPanel();
   }
 
@@ -4731,4 +5329,8 @@
   tryRestoreSession().then((ok) => {
     if (ok) maybeAutoJoinRoom();
   });
+
+  const btnExportScheme = $('#btn-export-scheme');
+  if (btnExportScheme) btnExportScheme.addEventListener('click', onExportSchemeMenu);
+
 })();
