@@ -107,6 +107,7 @@
     connectorFromId: null,
     inlineEdit: null,
     editingRoomLinkId: null,
+    editingCardLinkId: null,
     tabs: [], // { roomId }
     joining: false,
     lastPointerWorld: null,
@@ -132,6 +133,7 @@
   const inlineEditEl = $('#inline-edit');
   const connectorHint = $('#connector-hint');
   const roomLinkPanel = $('#room-link-panel');
+  const cardLinkPanel = $('#card-link-panel');
   const cardPanel = $('#card-panel');
   const roomTabsEl = $('#room-tabs');
   const dmUsersEl = $('#dm-users');
@@ -721,7 +723,7 @@
     }
     if (tool === 'text' || tool === 'sticky') setColorTarget('text');
     else if (
-      tool === 'pen' || tool === 'line' || tool === 'arrow' || tool === 'roomLink' ||
+      tool === 'pen' || tool === 'line' || tool === 'arrow' || tool === 'roomLink' || tool === 'cardLink' ||
       ['rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event'].includes(tool)
     ) {
       setColorTarget('shape');
@@ -779,17 +781,17 @@
     if (obj.type === 'text') return 18;
     if (obj.type === 'sticky') return 14;
     if (obj.type === 'gateway' || obj.type === 'event') return 12;
-    if (obj.type === 'roomLink') return 14;
+    if (obj.type === 'roomLink' || obj.type === 'cardLink') return 14;
     return 13;
   }
 
   const TEXT_COLOR_TYPES = new Set([
     'rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event',
-    'sticky', 'text', 'roomLink',
+    'sticky', 'text', 'roomLink', 'cardLink',
   ]);
   const FONT_SIZE_TYPES = new Set([
     'rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event',
-    'sticky', 'text', 'roomLink',
+    'sticky', 'text', 'roomLink', 'cardLink',
   ]);
 
 
@@ -928,6 +930,7 @@
     if (state.inlineEdit) return true;
     if (el === inlineEditEl || inlineEditEl.contains(el)) return true;
     if (roomLinkPanel && (el === roomLinkPanel || roomLinkPanel.contains(el))) return true;
+    if (cardLinkPanel && (el === cardLinkPanel || cardLinkPanel.contains(el))) return true;
     const tag = el.tagName;
     return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
   }
@@ -977,6 +980,10 @@
         closeRoomLinkPanel();
         return;
       }
+      if (cardLinkPanel && !cardLinkPanel.classList.contains('hidden')) {
+        closeCardLinkPanel();
+        return;
+      }
       state.connectorFromId = null;
       state.selectedIds.clear();
       state.selectedConnectorIds.clear();
@@ -988,6 +995,9 @@
       if (sel && sel.type === 'roomLink') {
         e.preventDefault();
         openRoomLinkPanel(sel);
+      } else if (sel && sel.type === 'cardLink') {
+        e.preventDefault();
+        openCardLinkPanel(sel);
       }
     }
   });
@@ -1062,6 +1072,10 @@
         renderKanban();
         if (state.editingCardId === card.id) syncCardPanel(card);
       }
+      if (state.view === 'canvas' && state.objects.some((o) => o.type === 'cardLink')) draw();
+      if (state.editingCardLinkId && $('#card-link-board').value === 'room') {
+        fillCardLinkCardSelect('room', $('#card-link-card').value);
+      }
     });
     socket.on('card-update', (card) => {
       const i = state.cards.findIndex((c) => c.id === card.id);
@@ -1069,6 +1083,10 @@
       if (state.kanbanMode === 'room') {
         renderKanban();
         if (state.editingCardId === card.id) syncCardPanel(card);
+      }
+      if (state.view === 'canvas' && state.objects.some((o) => o.type === 'cardLink' && o.cardId === card.id)) draw();
+      if (state.editingCardLinkId && $('#card-link-board').value === 'room') {
+        fillCardLinkCardSelect('room', $('#card-link-card').value);
       }
     });
     socket.on('card-delete', ({ id }) => {
@@ -1109,6 +1127,10 @@
         renderKanban();
         if (state.editingCardId === card.id) syncCardPanel(card);
       }
+      if (state.view === 'canvas' && state.objects.some((o) => o.type === 'cardLink')) draw();
+      if (state.editingCardLinkId && $('#card-link-board').value === 'personal') {
+        fillCardLinkCardSelect('personal', $('#card-link-card').value);
+      }
     });
     socket.on('personal-card-update', (card) => {
       const i = state.personalCards.findIndex((c) => c.id === card.id);
@@ -1116,6 +1138,10 @@
       if (state.kanbanMode === 'personal') {
         renderKanban();
         if (state.editingCardId === card.id) syncCardPanel(card);
+      }
+      if (state.view === 'canvas' && state.objects.some((o) => o.type === 'cardLink' && o.cardId === card.id)) draw();
+      if (state.editingCardLinkId && $('#card-link-board').value === 'personal') {
+        fillCardLinkCardSelect('personal', $('#card-link-card').value);
       }
     });
     socket.on('personal-card-delete', ({ id }) => {
@@ -1252,7 +1278,7 @@
   }
 
   // ---------- Geometry helpers ----------
-  const SHAPE_TYPES = new Set(['rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event', 'sticky', 'roomLink', 'image']);
+  const SHAPE_TYPES = new Set(['rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event', 'sticky', 'roomLink', 'cardLink', 'image']);
 
   function centerOf(obj) {
     const b = boundsOf(obj);
@@ -1516,6 +1542,52 @@
       ctx.fillText(sub, x + 10, titleY + 16);
       ctx.textAlign = 'start';
       ctx.textBaseline = 'alphabetic';
+    } else if (obj.type === 'cardLink') {
+      const x = Math.min(obj.x, obj.x + obj.w);
+      const y = Math.min(obj.y, obj.y + obj.h);
+      const w = Math.abs(obj.w) || 160;
+      const h = Math.abs(obj.h) || 100;
+      const accent = '#22c55e';
+      const textCol = getComputedStyle(document.documentElement).getPropertyValue('--text').trim() || '#e8eef7';
+      const muted = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#8b9bb4';
+      ctx.fillStyle = obj.fill || 'rgba(34,197,94,0.08)';
+      ctx.strokeStyle = obj.stroke || accent;
+      ctx.lineWidth = obj.strokeWidth || 2;
+      ctx.setLineDash([8 / Math.max(state.camera.scale, 0.01), 6 / Math.max(state.camera.scale, 0.01)]);
+      drawRoundedRect(x, y, w, h, 12);
+      ctx.fill();
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // header bar
+      const headerH = Math.min(28, Math.max(22, h * 0.22));
+      ctx.fillStyle = 'rgba(34,197,94,0.18)';
+      drawRoundedRect(x + 1, y + 1, w - 2, headerH, 10);
+      ctx.fill();
+      // inset frame feel
+      ctx.strokeStyle = 'rgba(34,197,94,0.25)';
+      ctx.lineWidth = 1 / Math.max(state.camera.scale, 0.01);
+      ctx.strokeRect(x + 6, y + headerH + 4, Math.max(0, w - 12), Math.max(0, h - headerH - 10));
+      // title
+      const title = cardLinkTitle(obj);
+      ctx.fillStyle = obj.textColor || textCol;
+      const titleFs = obj.fontSize != null ? objectFontSize(obj) : Math.max(12, Math.min(14, h * 0.16));
+      ctx.font = `600 ${titleFs}px Segoe UI, system-ui, sans-serif`;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      const maxTitleW = w - 36;
+      let drawnTitle = '📋 ' + title;
+      while (drawnTitle.length > 3 && ctx.measureText(drawnTitle).width > maxTitleW) {
+        drawnTitle = drawnTitle.slice(0, -1);
+      }
+      if (drawnTitle !== ('📋 ' + title) && drawnTitle.length > 4) drawnTitle = drawnTitle.slice(0, -1) + '…';
+      ctx.fillText(drawnTitle, x + 10, y + headerH / 2 + 1);
+      ctx.fillStyle = muted;
+      ctx.font = `${Math.max(10, Math.min(11, h * 0.12))}px Segoe UI, system-ui, sans-serif`;
+      const boardLabel = obj.cardBoard === 'room' ? 'комната' : 'личная';
+      const sub = obj.cardId ? `канбан · ${boardLabel}` : 'задача не привязана';
+      ctx.fillText(sub, x + 10, y + headerH + 16);
+      ctx.textAlign = 'start';
+      ctx.textBaseline = 'alphabetic';
     } else if (obj.type === 'image') {
       const x = Math.min(obj.x, obj.x + obj.w);
       const y = Math.min(obj.y, obj.y + obj.h);
@@ -1731,16 +1803,21 @@
   }
 
   function hitTest(wx, wy) {
+    let cardLinkHit = null;
     for (let i = state.objects.length - 1; i >= 0; i--) {
       const obj = state.objects[i];
       const b = boundsOf(obj);
       if (!b) continue;
       const pad = 6 / state.camera.scale;
       if (wx >= b.x - pad && wx <= b.x + b.w + pad && wy >= b.y - pad && wy <= b.y + b.h + pad) {
+        if (obj.type === 'cardLink') {
+          if (!cardLinkHit) cardLinkHit = obj;
+          continue;
+        }
         return obj;
       }
     }
-    return null;
+    return cardLinkHit;
   }
 
   function hitTestConnector(wx, wy) {
@@ -1853,20 +1930,42 @@
   }
 
   function deleteSelected() {
-    const objIds = [...state.selectedIds];
+    let objIds = [...state.selectedIds];
     const connIds = [...state.selectedConnectorIds];
     if (!objIds.length && !connIds.length) return;
 
     if (objIds.length) {
-      state.objects = state.objects.filter((o) => !state.selectedIds.has(o.id));
+      const cardLinkIds = objIds.filter((id) => {
+        const o = state.objects.find((x) => x.id === id);
+        return o && o.type === 'cardLink';
+      });
+      if (cardLinkIds.length) {
+        const ok = window.confirm('Удалить контейнер задачи? Вложенные фигуры останутся на холсте.');
+        if (!ok) return;
+        const keepChildren = new Set();
+        for (const obj of state.objects) {
+          if (obj.parentId && cardLinkIds.includes(obj.parentId)) {
+            keepChildren.add(obj.id);
+            obj.parentId = null;
+            emit('object-update', obj);
+          }
+        }
+        objIds = objIds.filter((id) => !keepChildren.has(id));
+        if (!objIds.length && !connIds.length) {
+          draw();
+          return;
+        }
+      }
+      const delSet = new Set(objIds);
+      state.objects = state.objects.filter((o) => !delSet.has(o.id));
       const orphaned = state.connectors.filter(
-        (c) => state.selectedIds.has(c.fromId) || state.selectedIds.has(c.toId)
+        (c) => delSet.has(c.fromId) || delSet.has(c.toId)
       );
       state.connectors = state.connectors.filter(
-        (c) => !state.selectedIds.has(c.fromId) && !state.selectedIds.has(c.toId)
+        (c) => !delSet.has(c.fromId) && !delSet.has(c.toId)
       );
-      state.selectedIds.clear();
-      emit('object-delete', { ids: objIds });
+      for (const id of objIds) state.selectedIds.delete(id);
+      if (objIds.length) emit('object-delete', { ids: objIds });
       if (orphaned.length) {
         // server also cleans; local already updated
       }
@@ -1913,6 +2012,185 @@
     if (label) return label;
     const rid = normalizeRoomCode(obj.roomId);
     return rid ? `→ ${rid}` : 'Ссылка на комнату';
+  }
+
+  function cardsForBoard(board) {
+    return board === 'room' ? state.cards : state.personalCards;
+  }
+
+  function columnsForBoard(board) {
+    return board === 'personal' ? state.personalColumns : state.columns;
+  }
+
+  function findCardOnBoard(cardId, board) {
+    if (!cardId) return null;
+    return cardsForBoard(board === 'room' ? 'room' : 'personal').find((c) => c.id === cardId) || null;
+  }
+
+  function cardLinkTitle(obj) {
+    if (!obj) return 'Задача';
+    const label = (obj.label || '').trim();
+    if (label) return label;
+    const board = obj.cardBoard === 'room' ? 'room' : 'personal';
+    const card = findCardOnBoard(obj.cardId, board);
+    if (card && card.title) return card.title;
+    return 'Задача';
+  }
+
+  function fillCardLinkCardSelect(board, selectedId) {
+    const sel = $('#card-link-card');
+    if (!sel) return;
+    const cards = [...cardsForBoard(board)].sort((a, b) =>
+      String(a.title || '').localeCompare(String(b.title || ''), 'ru')
+    );
+    const cur = selectedId || '';
+    sel.innerHTML = '<option value="">— не выбрана —</option>' + cards.map((c) => {
+      const title = escapeHtml(c.title || 'Без названия');
+      const selected = c.id === cur ? ' selected' : '';
+      return `<option value="${c.id}"${selected}>${title}</option>`;
+    }).join('');
+  }
+
+  function openCardLinkPanel(obj) {
+    if (!obj || obj.type !== 'cardLink') return;
+    cancelInlineEdit(true);
+    closeRoomLinkPanel();
+    state.editingCardLinkId = obj.id;
+    const board = obj.cardBoard === 'room' ? 'room' : (obj.cardBoard === 'personal' ? 'personal' : (state.kanbanMode || 'personal'));
+    $('#card-link-board').value = board;
+    $('#card-link-label').value = obj.label || '';
+    fillCardLinkCardSelect(board, obj.cardId || '');
+    cardLinkPanel.classList.remove('hidden');
+    const labelInput = $('#card-link-label');
+    labelInput.focus();
+    labelInput.select();
+  }
+
+  function closeCardLinkPanel() {
+    state.editingCardLinkId = null;
+    cardLinkPanel.classList.add('hidden');
+  }
+
+  function saveCardLinkPanel() {
+    if (!state.editingCardLinkId) return null;
+    const obj = state.objects.find((o) => o.id === state.editingCardLinkId);
+    if (!obj) {
+      closeCardLinkPanel();
+      return null;
+    }
+    const board = $('#card-link-board').value === 'room' ? 'room' : 'personal';
+    const cardId = String($('#card-link-card').value || '').trim() || null;
+    const label = String($('#card-link-label').value || '').trim().slice(0, 80);
+    obj.cardBoard = board;
+    obj.cardId = cardId;
+    obj.label = label;
+    emit('object-update', obj);
+    draw();
+    return obj;
+  }
+
+  function navigateCardLink(obj) {
+    if (!obj || obj.type !== 'cardLink') return;
+    if (!obj.cardId) {
+      toast('Сначала привяжите карточку канбана');
+      openCardLinkPanel(obj);
+      return;
+    }
+    const board = obj.cardBoard === 'room' ? 'room' : 'personal';
+    closeCardLinkPanel();
+    setView('kanban', { kanbanMode: board });
+    // open after view switch so activeCards() sees the right board
+    requestAnimationFrame(() => openCardPanel(obj.cardId));
+  }
+
+  function emitCardAddOnBoard(board, data, ack) {
+    const event = board === 'personal' ? 'personal-card-add' : 'card-add';
+    emit(event, data, ack);
+  }
+
+  function createCardForCardLink() {
+    if (!state.editingCardLinkId) return;
+    const obj = state.objects.find((o) => o.id === state.editingCardLinkId);
+    if (!obj) return;
+    const board = $('#card-link-board').value === 'room' ? 'room' : 'personal';
+    const cols = [...columnsForBoard(board)].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    if (!cols.length) {
+      toast('На доске нет колонок');
+      return;
+    }
+    const title = String($('#card-link-label').value || '').trim() || 'Новая карточка';
+    const columnId = cols[0].id;
+    const order = cardsForBoard(board).filter((c) => c.columnId === columnId).length;
+    emitCardAddOnBoard(board, {
+      columnId,
+      title,
+      description: '',
+      dueDate: null,
+      order,
+    }, (res) => {
+      if (!res || !res.ok || !res.card) {
+        toast((res && res.error) || 'Не удалось создать карточку');
+        return;
+      }
+      // ensure local list has the card (socket may also deliver)
+      const list = board === 'room' ? state.cards : state.personalCards;
+      if (!list.find((c) => c.id === res.card.id)) list.push(res.card);
+      obj.cardBoard = board;
+      obj.cardId = res.card.id;
+      if (!(obj.label || '').trim()) obj.label = res.card.title || '';
+      $('#card-link-label').value = obj.label || '';
+      fillCardLinkCardSelect(board, obj.cardId);
+      emit('object-update', obj);
+      draw();
+      toast('Карточка создана и привязана');
+    });
+  }
+
+  function childrenOfCardLink(cardLinkId) {
+    return state.objects.filter((o) => o.parentId === cardLinkId);
+  }
+
+  function expandDragIdsWithChildren(ids) {
+    const out = new Set(ids);
+    for (const id of ids) {
+      const o = state.objects.find((x) => x.id === id);
+      if (o && o.type === 'cardLink') {
+        for (const ch of childrenOfCardLink(id)) out.add(ch.id);
+      }
+    }
+    return [...out];
+  }
+
+  function findCardLinkAtPoint(wx, wy, excludeId) {
+    for (let i = state.objects.length - 1; i >= 0; i--) {
+      const o = state.objects[i];
+      if (o.type !== 'cardLink' || o.id === excludeId) continue;
+      const b = boundsOf(o);
+      if (b && pointInRect(wx, wy, b)) return o;
+    }
+    return null;
+  }
+
+  function reparentAfterDrag(movedIds) {
+    for (const id of movedIds) {
+      const obj = state.objects.find((o) => o.id === id);
+      if (!obj) continue;
+      if (obj.type === 'cardLink') {
+        if (obj.parentId) {
+          obj.parentId = null;
+          emit('object-update', obj);
+        }
+        continue;
+      }
+      const c = centerOf(obj);
+      if (!c) continue;
+      const host = findCardLinkAtPoint(c.x, c.y, obj.id);
+      const newParent = host ? host.id : null;
+      if ((obj.parentId || null) !== newParent) {
+        obj.parentId = newParent;
+        emit('object-update', obj);
+      }
+    }
   }
 
   function openRoomLinkPanel(obj) {
@@ -2217,6 +2495,49 @@
     }
   });
 
+
+  $('#card-link-panel-close').addEventListener('click', () => {
+    saveCardLinkPanel();
+    closeCardLinkPanel();
+  });
+  $('#card-link-close-btn').addEventListener('click', () => {
+    saveCardLinkPanel();
+    closeCardLinkPanel();
+  });
+  $('#card-link-save').addEventListener('click', () => {
+    const obj = saveCardLinkPanel();
+    closeCardLinkPanel();
+    if (obj && !obj.cardId) toast('Карточка не выбрана — привяжите позже');
+    else toast('Ссылка на задачу сохранена');
+  });
+  $('#card-link-open').addEventListener('click', () => {
+    const obj = saveCardLinkPanel();
+    if (obj) navigateCardLink(obj);
+  });
+  $('#card-link-create-card').addEventListener('click', () => {
+    createCardForCardLink();
+  });
+  $('#card-link-board').addEventListener('change', () => {
+    const board = $('#card-link-board').value === 'room' ? 'room' : 'personal';
+    fillCardLinkCardSelect(board, $('#card-link-card').value || '');
+  });
+  $('#card-link-label').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      $('#card-link-save').click();
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeCardLinkPanel();
+    }
+  });
+  $('#card-link-card').addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeCardLinkPanel();
+    }
+  });
+
   // ---------- Pointer handlers ----------
 
   // Middle mouse button: pan the canvas (block browser autoscroll)
@@ -2253,12 +2574,17 @@
     }
     if (e.target === inlineEditEl || inlineEditEl.contains(e.target)) return;
     if (roomLinkPanel.contains(e.target)) return;
+    if (cardLinkPanel && cardLinkPanel.contains(e.target)) return;
     const paletteEl = $('#color-palette');
     if (paletteEl && (e.target === paletteEl || paletteEl.contains(e.target))) return;
     if (state.inlineEdit) commitInlineEdit();
     if (!roomLinkPanel.classList.contains('hidden') && state.editingRoomLinkId) {
       saveRoomLinkPanel();
       closeRoomLinkPanel();
+    }
+    if (cardLinkPanel && !cardLinkPanel.classList.contains('hidden') && state.editingCardLinkId) {
+      saveCardLinkPanel();
+      closeCardLinkPanel();
     }
 
     const willPlaceEditable = state.tool === 'sticky' || state.tool === 'text';
@@ -2350,6 +2676,9 @@
               corner,
               start: world,
               orig: structuredClone(sel),
+              childOriginals: sel.type === 'cardLink'
+                ? Object.fromEntries(childrenOfCardLink(sel.id).map((o) => [o.id, structuredClone(o)]))
+                : null,
             };
             return;
           }
@@ -2364,6 +2693,9 @@
         if (hit.type === 'roomLink') {
           if (e.altKey) openRoomLinkPanel(hit);
           else navigateRoomLink(hit);
+        } else if (hit.type === 'cardLink') {
+          if (e.altKey) openCardLinkPanel(hit);
+          else navigateCardLink(hit);
         } else {
           queueInlineEdit(hit);
         }
@@ -2379,13 +2711,18 @@
         }
         state.selectedIds.add(hit.id);
         syncColorTargetFromSelection();
-        state.dragging = {
-          ids: [...state.selectedIds],
-          start: world,
-          originals: Object.fromEntries(
-            state.objects.filter((o) => state.selectedIds.has(o.id)).map((o) => [o.id, structuredClone(o)])
-          ),
-        };
+        {
+          const primaryIds = [...state.selectedIds];
+          const dragIds = expandDragIdsWithChildren(primaryIds);
+          state.dragging = {
+            ids: dragIds,
+            primaryIds,
+            start: world,
+            originals: Object.fromEntries(
+              state.objects.filter((o) => dragIds.includes(o.id)).map((o) => [o.id, structuredClone(o)])
+            ),
+          };
+        }
       } else if (hitConn) {
         if (!e.shiftKey) {
           state.selectedIds.clear();
@@ -2413,7 +2750,7 @@
       }
     }
 
-    const shapeTools = ['rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event'];
+    const shapeTools = ['rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event', 'cardLink'];
     if (shapeTools.includes(state.tool)) {
       state.drawing = {
         id: uid('obj'),
@@ -2423,11 +2760,15 @@
         w: 0,
         h: 0,
         stroke: state.strokeColor,
-        fill: 'transparent',
+        fill: state.tool === 'cardLink' ? 'rgba(34,197,94,0.08)' : 'transparent',
         strokeWidth: 2,
         label: '',
         textColor: state.textColor,
         fontSize: state.fontSize || 18,
+        ...(state.tool === 'cardLink' ? {
+          cardId: null,
+          cardBoard: state.kanbanMode === 'room' ? 'room' : 'personal',
+        } : {}),
       };
       return;
     }
@@ -2577,6 +2918,16 @@
           obj.w = s;
           obj.h = s;
         }
+        if (obj.type === 'cardLink' && state.resizing.childOriginals) {
+          const dx = obj.x - orig.x;
+          const dy = obj.y - orig.y;
+          for (const [cid, corig] of Object.entries(state.resizing.childOriginals)) {
+            const child = state.objects.find((o) => o.id === cid);
+            if (!child) continue;
+            applyDelta(child, corig, dx, dy);
+            emit('object-update', child);
+          }
+        }
         emit('object-update', obj);
         draw();
       }
@@ -2666,7 +3017,12 @@
       state.panning = false;
       setTool(state.tool);
     }
-    if (state.dragging) state.dragging = null;
+    if (state.dragging) {
+      const primary = state.dragging.primaryIds || state.dragging.ids;
+      reparentAfterDrag(primary);
+      state.dragging = null;
+      draw();
+    }
     if (state.resizing) {
       const obj = state.objects.find((o) => o.id === state.resizing.id);
       if (obj) {
@@ -2688,6 +3044,11 @@
         obj.w = obj.type === 'event' ? 100 : 80;
         obj.h = obj.type === 'event' ? 50 : 80;
         if (obj.type === 'task') { obj.w = 120; obj.h = 70; }
+        if (obj.type === 'cardLink') { obj.w = 160; obj.h = 100; }
+      }
+      if (obj.type === 'cardLink') {
+        if (Math.abs(obj.w) < 160) obj.w = (obj.w < 0 ? -1 : 1) * 160;
+        if (Math.abs(obj.h) < 100) obj.h = (obj.h < 0 ? -1 : 1) * 100;
       }
       if ((obj.type === 'line' || obj.type === 'arrow') && Math.hypot(obj.x2 - obj.x1, obj.y2 - obj.y1) < 3) {
         setTool('select');
@@ -2700,6 +3061,7 @@
       syncColorTargetFromSelection();
       setTool('select');
       draw();
+      if (obj.type === 'cardLink') openCardLinkPanel(obj);
     }
   });
 
