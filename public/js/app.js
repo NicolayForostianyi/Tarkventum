@@ -82,6 +82,13 @@
     textColor: '#1f2937',
     colorTarget: 'shape', // shape | text
     fontSize: 18,
+    penStrokeWidth: 2.5,
+    pendingPens: [], // freehand drafts while pencil tool stays active
+    roomOwnerId: null,
+    roomVisibility: 'public',
+    roomMembers: [],
+    myRoomRole: null,
+    lastOtherCursorAt: 0,
     objects: [],
     connectors: [],
     selectedIds: new Set(),
@@ -99,6 +106,7 @@
     drawing: null,
     dragging: null,
     resizing: null,
+    rotating: null, // { id, startAngle, origRotation, center }
     marquee: null, // { x1,y1,x2,y2, additive }
     panning: false,
     spaceDown: false,
@@ -314,6 +322,7 @@
     lobby.classList.remove('hidden');
     app.classList.add('hidden');
     updateUserChrome();
+    refreshPublicRooms();
   }
 
   function showAuth() {
@@ -457,7 +466,7 @@
     return state.socket;
   }
 
-  function enterRoom(roomId, { addTab = true } = {}) {
+  function enterRoom(roomId, { addTab = true, create = false, visibility } = {}) {
     if (!state.account || !state.token) {
       showAuth();
       return;
@@ -471,7 +480,12 @@
     }
     state.joining = true;
     cancelInlineEdit(true);
-    socket.emit('join-room', { roomId }, (res) => {
+    const vis = visibility || (document.querySelector('input[name="room-visibility"]:checked') || {}).value || 'public';
+    socket.emit('join-room', {
+      roomId,
+      create: !!create,
+      visibility: create ? vis : undefined,
+    }, (res) => {
       state.joining = false;
       if (!res || !res.ok) {
         showError((res && res.error) || 'Не удалось войти');
@@ -480,6 +494,7 @@
       }
       if (addTab) upsertTab(res.roomId);
       applyJoin(res);
+      refreshPublicRooms();
     });
   }
 
@@ -496,6 +511,11 @@
     state.cards = (s.cards || []).map((c) => ({ dueDate: null, ...c }));
     state.messages = s.messages || [];
     state.users = new Map((s.users || []).map((u) => [u.id, u]));
+    state.roomOwnerId = s.ownerId || res.accountId || null;
+    state.roomVisibility = s.visibility || 'public';
+    state.roomMembers = s.members || [];
+    state.myRoomRole = res.myRole || (res.isOwner ? 'owner' : 'member');
+    state.lastOtherCursorAt = 0;
     state.selectedIds.clear();
     state.selectedConnectorIds.clear();
     state.hoverId = null;
@@ -510,7 +530,9 @@
     authScreen.classList.add('hidden');
     lobby.classList.add('hidden');
     app.classList.remove('hidden');
-    $('#room-badge').textContent = state.roomId;
+    const vis = state.roomVisibility === 'private' ? '🔒 ' : '';
+    $('#room-badge').textContent = vis + state.roomId;
+    updateRoomOwnerChrome();
     updateKanbanChrome();
     updateUserChrome();
     renderTabs();
@@ -527,7 +549,7 @@
   $('#btn-create').addEventListener('click', () => {
     const code = roomInput.value.trim() || randomRoomCode();
     roomInput.value = code;
-    enterRoom(code);
+    enterRoom(code, { create: true });
   });
   $('#btn-join').addEventListener('click', () => {
     const code = roomInput.value.trim();
@@ -582,15 +604,59 @@
   }
   function renderTabs() {
     roomTabsEl.innerHTML = '';
-    for (const tab of state.tabs) {
+    state.tabs.forEach((tab, index) => {
       const el = document.createElement('div');
       el.className = 'room-tab' + (tab.roomId === state.roomId ? ' active' : '');
+      el.draggable = true;
+      el.dataset.roomId = tab.roomId;
+      el.dataset.index = String(index);
+      const lock = tab.visibility === 'private' ? '🔒 ' : '';
       el.innerHTML = `
-        <button class="room-tab-label" type="button" data-switch="${escapeHtml(tab.roomId)}">${escapeHtml(tab.roomId)}</button>
+        <button class="room-tab-label" type="button" data-switch="${escapeHtml(tab.roomId)}">${lock}${escapeHtml(tab.roomId)}</button>
         <button class="room-tab-close" type="button" data-close="${escapeHtml(tab.roomId)}" title="Закрыть">×</button>
       `;
+      el.addEventListener('dragstart', (e) => {
+        el.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', tab.roomId);
+        state._tabDragId = tab.roomId;
+      });
+      el.addEventListener('dragend', () => {
+        el.classList.remove('dragging');
+        $$('.room-tab', roomTabsEl).forEach((t) => t.classList.remove('drag-over', 'drag-over-after'));
+        state._tabDragId = null;
+      });
+      el.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        const fromId = state._tabDragId;
+        if (!fromId || fromId === tab.roomId) return;
+        const rect = el.getBoundingClientRect();
+        const after = e.clientX > rect.left + rect.width / 2;
+        el.classList.toggle('drag-over', !after);
+        el.classList.toggle('drag-over-after', after);
+      });
+      el.addEventListener('dragleave', () => {
+        el.classList.remove('drag-over', 'drag-over-after');
+      });
+      el.addEventListener('drop', (e) => {
+        e.preventDefault();
+        const fromId = e.dataTransfer.getData('text/plain') || state._tabDragId;
+        el.classList.remove('drag-over', 'drag-over-after');
+        if (!fromId || fromId === tab.roomId) return;
+        const from = state.tabs.findIndex((t) => t.roomId === fromId);
+        let to = state.tabs.findIndex((t) => t.roomId === tab.roomId);
+        if (from < 0 || to < 0) return;
+        const rect = el.getBoundingClientRect();
+        const after = e.clientX > rect.left + rect.width / 2;
+        const [item] = state.tabs.splice(from, 1);
+        if (from < to) to -= 1;
+        if (after) to += 1;
+        state.tabs.splice(to, 0, item);
+        saveTabs();
+        renderTabs();
+      });
       roomTabsEl.appendChild(el);
-    }
+    });
     $$('.room-tab-label', roomTabsEl).forEach((btn) => {
       btn.addEventListener('click', () => switchTab(btn.dataset.switch));
     });
@@ -710,7 +776,37 @@
   }
 
   // ---------- Tools ----------
+  const DB_TYPES = new Set([
+    'dbTable', 'dbView', 'dbSchema', 'dbDatabase', 'dbIndex', 'dbProcedure', 'dbTrigger', 'dbEnum',
+  ]);
+  const ROTATABLE_TYPES = new Set([
+    'rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event',
+    'sticky', 'text', 'roomLink', 'cardLink', 'image',
+    ...DB_TYPES,
+  ]);
+
+  function commitPendingPens() {
+    if (!state.pendingPens || !state.pendingPens.length) return;
+    const pens = state.pendingPens.splice(0, state.pendingPens.length);
+    for (const obj of pens) {
+      if (!obj.points || obj.points.length < 2) continue;
+      state.objects.push(obj);
+      emit('object-add', obj);
+    }
+    draw();
+  }
+
   function setTool(tool) {
+    const prev = state.tool;
+    if (prev === 'pen' && tool !== 'pen') {
+      // finalize draft stroke if mid-draw, then commit all pending freehands
+      if (state.drawing && state.drawing.type === 'pen') {
+        const draft = state.drawing;
+        state.drawing = null;
+        if (draft.points && draft.points.length >= 2) state.pendingPens.push(draft);
+      }
+      commitPendingPens();
+    }
     state.tool = tool;
     $$('.tool[data-tool]').forEach((b) => b.classList.toggle('active', b.dataset.tool === tool));
     canvasWrap.style.cursor = tool === 'pan' || state.spaceDown ? 'grab' : tool === 'select' ? 'default' : 'crosshair';
@@ -724,10 +820,13 @@
     if (tool === 'text' || tool === 'sticky') setColorTarget('text');
     else if (
       tool === 'pen' || tool === 'line' || tool === 'arrow' || tool === 'roomLink' || tool === 'cardLink' ||
-      ['rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event'].includes(tool)
+      ['rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event'].includes(tool) ||
+      DB_TYPES.has(tool)
     ) {
       setColorTarget('shape');
     }
+    syncRotationUI();
+    syncPenWidthUI();
   }
   $$('.tool[data-tool]').forEach((btn) => {
     btn.addEventListener('click', () => setTool(btn.dataset.tool));
@@ -788,10 +887,12 @@
   const TEXT_COLOR_TYPES = new Set([
     'rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event',
     'sticky', 'text', 'roomLink', 'cardLink',
+    'dbTable', 'dbView', 'dbSchema', 'dbDatabase', 'dbIndex', 'dbProcedure', 'dbTrigger', 'dbEnum',
   ]);
   const FONT_SIZE_TYPES = new Set([
     'rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event',
     'sticky', 'text', 'roomLink', 'cardLink',
+    'dbTable', 'dbView', 'dbSchema', 'dbDatabase', 'dbIndex', 'dbProcedure', 'dbTrigger', 'dbEnum',
   ]);
 
 
@@ -819,6 +920,10 @@
         state.strokeColor = o.stroke;
       }
       syncFontSizeUI(objectFontSize(o));
+      if (o.type === 'pen') syncPenWidthUI(o.strokeWidth || state.penStrokeWidth);
+      syncRotationUI(o.rotation || 0);
+    } else {
+      syncRotationUI();
     }
     syncColorUI();
   }
@@ -921,8 +1026,95 @@
   const fontInc = $('#font-size-inc');
   if (fontDec) fontDec.addEventListener('click', () => setFontSize((state.fontSize || 18) - 1));
   if (fontInc) fontInc.addEventListener('click', () => setFontSize((state.fontSize || 18) + 1));
+
+  function clampPenWidth(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return state.penStrokeWidth || 2.5;
+    return Math.max(1, Math.min(32, Math.round(v * 2) / 2));
+  }
+  function syncPenWidthUI(w) {
+    const input = $('#pen-width-input');
+    if (input) input.value = String(w != null ? w : (state.penStrokeWidth || 2.5));
+  }
+  function setPenWidth(w, { applyToSelection = true } = {}) {
+    const next = clampPenWidth(w);
+    state.penStrokeWidth = next;
+    syncPenWidthUI(next);
+    if (!applyToSelection) return;
+    let changed = false;
+    for (const id of state.selectedIds) {
+      const obj = state.objects.find((o) => o.id === id);
+      if (!obj || obj.type !== 'pen') continue;
+      obj.strokeWidth = next;
+      emit('object-update', obj);
+      changed = true;
+    }
+    if (changed) draw();
+  }
+  const penWidthInput = $('#pen-width-input');
+  if (penWidthInput) {
+    penWidthInput.addEventListener('change', (e) => setPenWidth(e.target.value));
+    penWidthInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); setPenWidth(e.target.value); e.target.blur(); }
+    });
+  }
+  const penDec = $('#pen-width-dec');
+  const penInc = $('#pen-width-inc');
+  if (penDec) penDec.addEventListener('click', () => setPenWidth((state.penStrokeWidth || 2.5) - 0.5));
+  if (penInc) penInc.addEventListener('click', () => setPenWidth((state.penStrokeWidth || 2.5) + 0.5));
+
+  function clampRotation(n) {
+    let v = Math.round(Number(n));
+    if (!Number.isFinite(v)) return 0;
+    v = ((v % 360) + 360) % 360;
+    if (v > 180) v -= 360;
+    return v;
+  }
+  function syncRotationUI(deg) {
+    const input = $('#rotation-input');
+    if (!input) return;
+    if (deg != null) {
+      input.value = String(clampRotation(deg));
+      return;
+    }
+    if (state.selectedIds.size === 1) {
+      const obj = state.objects.find((o) => o.id === [...state.selectedIds][0]);
+      if (obj && ROTATABLE_TYPES.has(obj.type)) {
+        input.value = String(clampRotation(obj.rotation || 0));
+        return;
+      }
+    }
+    input.value = '0';
+  }
+  function setRotation(deg, { applyToSelection = true } = {}) {
+    const next = clampRotation(deg);
+    syncRotationUI(next);
+    if (!applyToSelection) return;
+    let changed = false;
+    for (const id of state.selectedIds) {
+      const obj = state.objects.find((o) => o.id === id);
+      if (!obj || !ROTATABLE_TYPES.has(obj.type)) continue;
+      obj.rotation = next;
+      emit('object-update', obj);
+      changed = true;
+    }
+    if (changed) draw();
+  }
+  const rotationInput = $('#rotation-input');
+  if (rotationInput) {
+    rotationInput.addEventListener('change', (e) => setRotation(e.target.value));
+    rotationInput.addEventListener('input', (e) => {
+      if (state.selectedIds.size) setRotation(e.target.value);
+    });
+    rotationInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); setRotation(e.target.value); e.target.blur(); }
+    });
+  }
+
   syncColorUI(getActiveColor());
   syncFontSizeUI(state.fontSize);
+  syncPenWidthUI();
+  syncRotationUI();
   $('#btn-delete').addEventListener('click', deleteSelected);
 
   function isTypingTarget(el) {
@@ -1024,8 +1216,40 @@
       const u = state.users.get(id);
       if (u) {
         u.cursor = cursor;
+        if (id !== state.userId && cursor) {
+          state.lastOtherCursorAt = Date.now();
+          refreshChatReadReceipts();
+        }
         renderCursors();
       }
+    });
+    socket.on('public-rooms', (rooms) => {
+      renderPublicRoomsList(Array.isArray(rooms) ? rooms : []);
+    });
+    socket.on('room-deleted', ({ roomId }) => {
+      if (roomId && roomId === state.roomId) {
+        toast('Комната удалена владельцем');
+        closeTab(roomId);
+      } else if (roomId) {
+        state.tabs = state.tabs.filter((t) => t.roomId !== roomId);
+        saveTabs();
+        renderTabs();
+      }
+      refreshPublicRooms();
+    });
+    socket.on('room-members', ({ roomId, members }) => {
+      if (roomId === state.roomId) {
+        state.roomMembers = members || [];
+        renderMembersPanel();
+      }
+    });
+    socket.on('room-kicked', ({ reason }) => {
+      toast(reason || 'Вас удалили из комнаты');
+      if (state.roomId) closeTab(state.roomId);
+    });
+    socket.on('room-invite-notice', (payload) => {
+      if (!payload) return;
+      toast(`Приглашение в комнату ${payload.roomId} от ${payload.fromName || 'пользователя'}`);
     });
     socket.on('object-add', (obj) => {
       if (!state.objects.find((o) => o.id === obj.id)) {
@@ -1278,10 +1502,35 @@
   }
 
   // ---------- Geometry helpers ----------
-  const SHAPE_TYPES = new Set(['rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event', 'sticky', 'roomLink', 'cardLink', 'image']);
+  const SHAPE_TYPES = new Set([
+    'rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event', 'sticky', 'roomLink', 'cardLink', 'image',
+    'dbTable', 'dbView', 'dbSchema', 'dbDatabase', 'dbIndex', 'dbProcedure', 'dbTrigger', 'dbEnum',
+  ]);
+
+  function objectRotationRad(obj) {
+    const deg = (obj && obj.rotation) || 0;
+    return (deg * Math.PI) / 180;
+  }
+
+  function rotatePoint(px, py, cx, cy, rad) {
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    const dx = px - cx;
+    const dy = py - cy;
+    return { x: cx + dx * cos - dy * sin, y: cy + dx * sin + dy * cos };
+  }
+
+  function worldToLocal(obj, wx, wy) {
+    const b = boundsOfUnrotated(obj);
+    if (!b) return { x: wx, y: wy };
+    const cx = b.x + b.w / 2;
+    const cy = b.y + b.h / 2;
+    const rad = -objectRotationRad(obj);
+    return rotatePoint(wx, wy, cx, cy, rad);
+  }
 
   function centerOf(obj) {
-    const b = boundsOf(obj);
+    const b = boundsOfUnrotated(obj) || boundsOf(obj);
     if (!b) return null;
     return { x: b.x + b.w / 2, y: b.y + b.h / 2 };
   }
@@ -1406,6 +1655,118 @@
     return img;
   }
 
+
+  const DB_META = {
+    dbTable: { title: 'Таблица', header: '#0ea5e9', badge: 'TABLE', defaultLabel: 'table_name', defaultAttrs: 'id  PK\ncreated_at' },
+    dbView: { title: 'Представление', header: '#8b5cf6', badge: 'VIEW', defaultLabel: 'view_name', defaultAttrs: 'col1\ncol2' },
+    dbSchema: { title: 'Схема', header: '#64748b', badge: 'SCHEMA', defaultLabel: 'public', defaultAttrs: '' },
+    dbDatabase: { title: 'База данных', header: '#0284c7', badge: 'DB', defaultLabel: 'database', defaultAttrs: '' },
+    dbIndex: { title: 'Индекс', header: '#f59e0b', badge: 'INDEX', defaultLabel: 'idx_name', defaultAttrs: 'column' },
+    dbProcedure: { title: 'Процедура', header: '#10b981', badge: 'PROC', defaultLabel: 'proc_name', defaultAttrs: 'arg1\nRETURNS void' },
+    dbTrigger: { title: 'Триггер', header: '#ef4444', badge: 'TRIG', defaultLabel: 'trg_name', defaultAttrs: 'AFTER INSERT\nON table' },
+    dbEnum: { title: 'Тип / Enum', header: '#ec4899', badge: 'ENUM', defaultLabel: 'enum_name', defaultAttrs: 'value1\nvalue2' },
+  };
+
+  function dbAttrLines(obj) {
+    const raw = (obj && (obj.text || obj.attrs || '')) || '';
+    return String(raw).split(/\r?\n/).map((s) => s.trimEnd()).filter((s, i, arr) => s.length || i < arr.length - 1);
+  }
+
+  function drawDbEntity(obj) {
+    const meta = DB_META[obj.type] || DB_META.dbTable;
+    const x = Math.min(obj.x, obj.x + obj.w);
+    const y = Math.min(obj.y, obj.y + obj.h);
+    const w = Math.abs(obj.w) || 200;
+    const h = Math.abs(obj.h) || 120;
+    const headerH = Math.min(28, Math.max(22, h * 0.22));
+    const primary = meta.header;
+    const textCol = obj.textColor || getComputedStyle(document.documentElement).getPropertyValue('--text').trim() || '#e8eef7';
+    const muted = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#8b9bb4';
+    const dashed = obj.type === 'dbView' || obj.type === 'dbSchema';
+
+    ctx.fillStyle = obj.fill || 'rgba(14,165,233,0.08)';
+    ctx.strokeStyle = obj.stroke || primary;
+    ctx.lineWidth = obj.strokeWidth || 2;
+    if (dashed) ctx.setLineDash([7 / Math.max(state.camera.scale, 0.01), 5 / Math.max(state.camera.scale, 0.01)]);
+    if (obj.type === 'dbDatabase') {
+      // cylinder-ish rounded rect
+      drawRoundedRect(x, y, w, h, 18);
+    } else if (obj.type === 'dbSchema') {
+      drawRoundedRect(x, y, w, h, 10);
+    } else {
+      drawRoundedRect(x, y, w, h, 8);
+    }
+    ctx.fill();
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // header bar
+    ctx.fillStyle = primary;
+    if (obj.type === 'dbDatabase') {
+      drawRoundedRect(x + 1, y + 1, w - 2, headerH, 16);
+      ctx.fill();
+    } else {
+      ctx.beginPath();
+      const r = 8;
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + w, y, x + w, y + h, r);
+      ctx.lineTo(x + w, y + headerH);
+      ctx.lineTo(x, y + headerH);
+      ctx.lineTo(x, y + r);
+      ctx.arcTo(x, y, x + w, y, r);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    // badge
+    ctx.fillStyle = 'rgba(255,255,255,0.92)';
+    ctx.font = `700 ${Math.max(9, Math.min(11, headerH - 10))}px Segoe UI, system-ui, sans-serif`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(meta.badge, x + 10, y + headerH / 2);
+
+    // name
+    const name = (obj.label || obj.name || meta.defaultLabel || '').trim() || meta.defaultLabel;
+    ctx.fillStyle = '#fff';
+    const nameFs = obj.fontSize != null ? Math.min(objectFontSize(obj), headerH - 6) : Math.max(11, Math.min(14, headerH - 8));
+    ctx.font = `600 ${nameFs}px Segoe UI, system-ui, sans-serif`;
+    const badgeW = ctx.measureText(meta.badge).width + 16;
+    let drawn = name;
+    const maxNameW = w - badgeW - 16;
+    while (drawn.length > 1 && ctx.measureText(drawn).width > maxNameW) drawn = drawn.slice(0, -1);
+    if (drawn !== name && drawn.length > 1) drawn = drawn.slice(0, -1) + '…';
+    ctx.fillText(drawn, x + 8 + badgeW, y + headerH / 2);
+
+    // body attrs
+    const lines = dbAttrLines(obj);
+    if (lines.length && obj.type !== 'dbSchema' && obj.type !== 'dbDatabase') {
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      const bodyFs = Math.max(10, Math.min(12, (obj.fontSize != null ? objectFontSize(obj) : 12) - 1));
+      const lh = Math.round(bodyFs * 1.35);
+      let yy = y + headerH + 8;
+      for (const line of lines) {
+        if (yy + lh > y + h - 4) break;
+        const isKey = /\bPK\b|\bFK\b|🔑|🔗/i.test(line);
+        ctx.fillStyle = isKey ? primary : textCol;
+        ctx.font = `${isKey ? '600 ' : ''}${bodyFs}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
+        let t = line;
+        while (t.length > 1 && ctx.measureText(t).width > w - 20) t = t.slice(0, -1);
+        if (t !== line && t.length > 1) t = t.slice(0, -1) + '…';
+        ctx.fillText(t || ' ', x + 10, yy);
+        yy += lh;
+      }
+    } else if (obj.type === 'dbSchema' || obj.type === 'dbDatabase') {
+      ctx.fillStyle = muted;
+      ctx.font = `${Math.max(11, Math.min(12, h * 0.12))}px Segoe UI, system-ui, sans-serif`;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(meta.title, x + 10, y + headerH + 10);
+    }
+    ctx.textAlign = 'start';
+    ctx.textBaseline = 'alphabetic';
+  }
+
   function drawObject(obj, { selected = false, hovered = false } = {}) {
     ctx.save();
     ctx.lineWidth = obj.strokeWidth || 2;
@@ -1415,8 +1776,19 @@
     ctx.lineJoin = 'round';
 
     const type = obj.type === 'square' ? 'rect' : obj.type;
+    const unrot = boundsOfUnrotated(obj);
+    const canRotate = ROTATABLE_TYPES.has(obj.type) && (obj.rotation || 0) && unrot;
+    if (canRotate) {
+      const cx = unrot.x + unrot.w / 2;
+      const cy = unrot.y + unrot.h / 2;
+      ctx.translate(cx, cy);
+      ctx.rotate(objectRotationRad(obj));
+      ctx.translate(-cx, -cy);
+    }
 
-    if (obj.type === 'pen' && obj.points && obj.points.length) {
+    if (DB_TYPES.has(obj.type)) {
+      drawDbEntity(obj);
+    } else if (obj.type === 'pen' && obj.points && obj.points.length) {
       ctx.beginPath();
       obj.points.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
       ctx.stroke();
@@ -1622,7 +1994,7 @@
     }
 
     if (selected || hovered) {
-      const b = boundsOf(obj);
+      const b = unrot || boundsOfUnrotated(obj) || boundsOf(obj);
       if (b) {
         if (hovered && !selected) {
           ctx.shadowColor = getComputedStyle(document.documentElement).getPropertyValue('--hover-glow').trim() || 'rgba(59,130,246,.45)';
@@ -1640,7 +2012,6 @@
           ctx.setLineDash([6 / state.camera.scale, 4 / state.camera.scale]);
           ctx.strokeRect(b.x - 4, b.y - 4, b.w + 8, b.h + 8);
           ctx.setLineDash([]);
-          // resize handles
           if (SHAPE_TYPES.has(obj.type) && obj.type !== 'text') {
             const hs = 6 / state.camera.scale;
             const corners = [
@@ -1651,6 +2022,19 @@
             for (const [hx, hy] of corners) {
               ctx.fillRect(hx - hs / 2, hy - hs / 2, hs, hs);
             }
+          }
+          if (ROTATABLE_TYPES.has(obj.type)) {
+            const cx = b.x + b.w / 2;
+            const topY = b.y - 4;
+            const handleY = topY - 18 / state.camera.scale;
+            ctx.beginPath();
+            ctx.moveTo(cx, topY);
+            ctx.lineTo(cx, handleY);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.arc(cx, handleY, 5 / state.camera.scale, 0, Math.PI * 2);
+            ctx.fillStyle = ctx.strokeStyle;
+            ctx.fill();
           }
         }
       }
@@ -1692,14 +2076,15 @@
     if (line) context.fillText(line, x, yy);
   }
 
-  function boundsOf(obj) {
+  function boundsOfUnrotated(obj) {
+    if (!obj) return null;
     if (obj.type === 'pen' && obj.points && obj.points.length) {
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       for (const p of obj.points) {
         minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
         maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
       }
-      return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+      return { x: minX, y: minY, w: Math.max(1, maxX - minX), h: Math.max(1, maxY - minY) };
     }
     if (SHAPE_TYPES.has(obj.type) && obj.type !== 'sticky') {
       return {
@@ -1724,9 +2109,31 @@
       ctx.font = `${fs}px Segoe UI, system-ui, sans-serif`;
       const w = ctx.measureText(obj.text || ' ').width;
       ctx.restore();
-      return { x: obj.x, y: obj.y - fs, w, h: fs * 1.2 };
+      return { x: obj.x, y: obj.y - fs, w: Math.max(w, 40), h: fs * 1.2 };
     }
     return null;
+  }
+
+  function boundsOf(obj) {
+    const b = boundsOfUnrotated(obj);
+    if (!b) return null;
+    const rot = (obj.rotation || 0) % 360;
+    if (!rot || !ROTATABLE_TYPES.has(obj.type)) return b;
+    const cx = b.x + b.w / 2;
+    const cy = b.y + b.h / 2;
+    const rad = objectRotationRad(obj);
+    const corners = [
+      rotatePoint(b.x, b.y, cx, cy, rad),
+      rotatePoint(b.x + b.w, b.y, cx, cy, rad),
+      rotatePoint(b.x, b.y + b.h, cx, cy, rad),
+      rotatePoint(b.x + b.w, b.y + b.h, cx, cy, rad),
+    ];
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of corners) {
+      minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
+    }
+    return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
   }
 
 
@@ -1806,10 +2213,15 @@
     let cardLinkHit = null;
     for (let i = state.objects.length - 1; i >= 0; i--) {
       const obj = state.objects[i];
-      const b = boundsOf(obj);
+      const b = boundsOfUnrotated(obj);
       if (!b) continue;
       const pad = 6 / state.camera.scale;
-      if (wx >= b.x - pad && wx <= b.x + b.w + pad && wy >= b.y - pad && wy <= b.y + b.h + pad) {
+      let lx = wx, ly = wy;
+      if (ROTATABLE_TYPES.has(obj.type) && (obj.rotation || 0)) {
+        const local = worldToLocal(obj, wx, wy);
+        lx = local.x; ly = local.y;
+      }
+      if (lx >= b.x - pad && lx <= b.x + b.w + pad && ly >= b.y - pad && ly <= b.y + b.h + pad) {
         if (obj.type === 'cardLink') {
           if (!cardLinkHit) cardLinkHit = obj;
           continue;
@@ -1844,8 +2256,13 @@
 
   function hitResizeHandle(obj, wx, wy) {
     if (!SHAPE_TYPES.has(obj.type) || obj.type === 'text') return null;
-    const b = boundsOf(obj);
+    const b = boundsOfUnrotated(obj);
     if (!b) return null;
+    let lx = wx, ly = wy;
+    if (ROTATABLE_TYPES.has(obj.type) && (obj.rotation || 0)) {
+      const local = worldToLocal(obj, wx, wy);
+      lx = local.x; ly = local.y;
+    }
     const hs = 8 / state.camera.scale;
     const handles = [
       { corner: 'nw', x: b.x, y: b.y },
@@ -1854,9 +2271,24 @@
       { corner: 'se', x: b.x + b.w, y: b.y + b.h },
     ];
     for (const h of handles) {
-      if (Math.abs(wx - h.x) <= hs && Math.abs(wy - h.y) <= hs) return h.corner;
+      if (Math.abs(lx - h.x) <= hs && Math.abs(ly - h.y) <= hs) return h.corner;
     }
     return null;
+  }
+
+  function hitRotationHandle(obj, wx, wy) {
+    if (!obj || !ROTATABLE_TYPES.has(obj.type)) return false;
+    const b = boundsOfUnrotated(obj);
+    if (!b) return false;
+    let lx = wx, ly = wy;
+    if (obj.rotation || 0) {
+      const local = worldToLocal(obj, wx, wy);
+      lx = local.x; ly = local.y;
+    }
+    const cx = b.x + b.w / 2;
+    const handleY = b.y - 4 - 18 / state.camera.scale;
+    const hs = 10 / state.camera.scale;
+    return Math.hypot(lx - cx, ly - handleY) <= hs;
   }
 
   function draw() {
@@ -1879,6 +2311,7 @@
         hovered: state.hoverId === obj.id && !state.selectedIds.has(obj.id),
       });
     }
+    for (const p of (state.pendingPens || [])) drawObject(p, {});
     if (state.drawing) drawObject(state.drawing, {});
     // preview connector line
     if (state.tool === 'connector' && state.connectorFromId && state._connectorPreview) {
@@ -2262,9 +2695,48 @@
     if (obj) startInlineEdit(obj);
   }
 
+
+  function queueInlineEditAttrs(objOrId) {
+    const id = typeof objOrId === 'string' ? objOrId : objOrId?.id;
+    if (!id) return;
+    pendingInlineEditId = null;
+    const obj = state.objects.find((o) => o.id === id);
+    if (obj) startInlineEditAttrs(obj);
+  }
+
+  function startInlineEditAttrs(obj) {
+    if (!obj || !DB_TYPES.has(obj.type)) return;
+    cancelInlineEdit(true);
+    const b = boundsOfUnrotated(obj) || boundsOf(obj);
+    if (!b) return;
+    const headerH = Math.min(28, Math.max(22, b.h * 0.22));
+    const tl = screenFromWorld(b.x, b.y + headerH);
+    const br = screenFromWorld(b.x + b.w, b.y + b.h);
+    inlineEditEl.classList.remove('hidden');
+    inlineEditEl.classList.add('sticky-edit');
+    inlineEditEl.style.left = `${tl.x}px`;
+    inlineEditEl.style.top = `${tl.y}px`;
+    inlineEditEl.style.width = `${Math.max(80, br.x - tl.x)}px`;
+    inlineEditEl.style.height = `${Math.max(40, br.y - tl.y)}px`;
+    inlineEditEl.style.fontSize = `${12 * state.camera.scale}px`;
+    inlineEditEl.style.color = objectTextColor(obj);
+    inlineEditEl.style.background = 'rgba(0,0,0,0.45)';
+    inlineEditEl.style.zIndex = '30';
+    const initial = obj.text || '';
+    inlineEditEl.textContent = initial;
+    state.inlineEdit = { id: obj.id, original: initial, field: 'text' };
+    inlineEditIgnoreBlurUntil = Date.now() + 200;
+    requestAnimationFrame(() => setTimeout(() => {
+      if (!state.inlineEdit || state.inlineEdit.id !== obj.id) return;
+      inlineEditEl.focus({ preventScroll: true });
+    }, 0));
+  }
+
   function startInlineEdit(obj) {
     if (!obj) return;
-    if (obj.type !== 'text' && obj.type !== 'sticky' && !['task', 'gateway', 'event', 'rect', 'square', 'circle', 'ellipse'].includes(obj.type)) {
+    const shapeLabelTypes = ['task', 'gateway', 'event', 'rect', 'square', 'circle', 'ellipse'];
+    const isDb = DB_TYPES.has(obj.type);
+    if (obj.type !== 'text' && obj.type !== 'sticky' && !shapeLabelTypes.includes(obj.type) && !isDb) {
       return;
     }
     setColorTarget('text');
@@ -2272,24 +2744,28 @@
     syncFontSizeUI(objectFontSize(obj));
     syncColorUI(state.textColor);
     cancelInlineEdit(true);
-    const b = boundsOf(obj);
+    const b = boundsOfUnrotated(obj) || boundsOf(obj);
     if (!b) return;
-    const tl = screenFromWorld(b.x, b.y);
-    const br = screenFromWorld(b.x + b.w, b.y + b.h);
+    const headerH = isDb ? Math.min(28, Math.max(22, b.h * 0.22)) : b.h;
+    const editTop = isDb ? b.y : b.y;
+    const editH = isDb ? headerH : b.h;
+    const tl = screenFromWorld(b.x, editTop);
+    const br = screenFromWorld(b.x + b.w, editTop + editH);
     inlineEditEl.classList.remove('hidden');
-    inlineEditEl.classList.toggle('sticky-edit', obj.type === 'sticky');
+    inlineEditEl.classList.toggle('sticky-edit', obj.type === 'sticky' || (isDb && false));
     inlineEditEl.style.left = `${tl.x}px`;
     inlineEditEl.style.top = `${tl.y}px`;
     inlineEditEl.style.width = `${Math.max(80, br.x - tl.x)}px`;
-    inlineEditEl.style.height = `${Math.max(28, br.y - tl.y)}px`;
+    inlineEditEl.style.height = `${Math.max(isDb ? 24 : 28, br.y - tl.y)}px`;
     const editFs = objectFontSize(obj);
     inlineEditEl.style.fontSize = `${editFs * state.camera.scale}px`;
-    inlineEditEl.style.color = objectTextColor(obj);
+    inlineEditEl.style.color = isDb ? '#ffffff' : objectTextColor(obj);
+    inlineEditEl.style.background = isDb ? 'rgba(0,0,0,0.35)' : '';
     inlineEditEl.style.zIndex = '30';
 
     const initial = obj.type === 'text' || obj.type === 'sticky'
       ? (obj.text || '')
-      : (obj.label || '');
+      : (obj.label || obj.name || '');
     inlineEditEl.textContent = initial;
     state.inlineEdit = {
       id: obj.id,
@@ -2319,6 +2795,7 @@
     inlineEditIgnoreBlurUntil = 0;
     inlineEditEl.classList.add('hidden');
     inlineEditEl.textContent = '';
+    inlineEditEl.style.background = '';
     if (!obj) return;
     if (field === 'text') obj.text = value;
     else obj.label = value;
@@ -2665,10 +3142,20 @@
         return;
       }
 
-      // resize?
+      // rotate / resize?
       if (state.selectedIds.size === 1) {
         const sel = state.objects.find((o) => o.id === [...state.selectedIds][0]);
         if (sel) {
+          if (hitRotationHandle(sel, world.x, world.y)) {
+            const c = centerOf(sel);
+            state.rotating = {
+              id: sel.id,
+              center: c,
+              startAngle: Math.atan2(world.y - c.y, world.x - c.x),
+              origRotation: sel.rotation || 0,
+            };
+            return;
+          }
           const corner = hitResizeHandle(sel, world.x, world.y);
           if (corner) {
             state.resizing = {
@@ -2689,6 +3176,30 @@
       const hitConn = hit ? null : hitTestConnector(world.x, world.y);
 
       const now = Date.now();
+      if (!hit && !hitConn && state.selectedIds.size === 0 && lastClick.id === null && now - lastClick.time < 350) {
+        // double-click empty canvas → text
+        const obj = {
+          id: uid('obj'),
+          type: 'text',
+          x: world.x,
+          y: world.y,
+          text: '',
+          stroke: state.textColor,
+          textColor: state.textColor,
+          fontSize: state.fontSize || 18,
+          w: 120,
+          h: 24,
+          rotation: 0,
+        };
+        state.objects.push(obj);
+        emit('object-add', obj);
+        state.selectedIds = new Set([obj.id]);
+        syncColorTargetFromSelection();
+        draw();
+        queueInlineEdit(obj);
+        lastClick = { time: 0, id: null };
+        return;
+      }
       if (hit && lastClick.id === hit.id && now - lastClick.time < 350) {
         if (hit.type === 'roomLink') {
           if (e.altKey) openRoomLinkPanel(hit);
@@ -2696,6 +3207,9 @@
         } else if (hit.type === 'cardLink') {
           if (e.altKey) openCardLinkPanel(hit);
           else navigateCardLink(hit);
+        } else if (DB_TYPES.has(hit.type)) {
+          if (e.shiftKey) queueInlineEditAttrs(hit);
+          else queueInlineEdit(hit); // name on header
         } else {
           queueInlineEdit(hit);
         }
@@ -2750,8 +3264,11 @@
       }
     }
 
-    const shapeTools = ['rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event', 'cardLink'];
+    const shapeTools = ['rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event', 'cardLink',
+      'dbTable', 'dbView', 'dbSchema', 'dbDatabase', 'dbIndex', 'dbProcedure', 'dbTrigger', 'dbEnum'];
     if (shapeTools.includes(state.tool)) {
+      const isDb = DB_TYPES.has(state.tool);
+      const meta = isDb ? DB_META[state.tool] : null;
       state.drawing = {
         id: uid('obj'),
         type: state.tool,
@@ -2760,11 +3277,13 @@
         w: 0,
         h: 0,
         stroke: state.strokeColor,
-        fill: state.tool === 'cardLink' ? 'rgba(34,197,94,0.08)' : 'transparent',
+        fill: state.tool === 'cardLink' ? 'rgba(34,197,94,0.08)' : (isDb ? 'rgba(14,165,233,0.08)' : 'transparent'),
         strokeWidth: 2,
-        label: '',
+        label: isDb ? (meta && meta.defaultLabel) || '' : '',
+        text: isDb ? (meta && meta.defaultAttrs) || '' : '',
         textColor: state.textColor,
         fontSize: state.fontSize || 18,
+        rotation: 0,
         ...(state.tool === 'cardLink' ? {
           cardId: null,
           cardBoard: state.kanbanMode === 'room' ? 'room' : 'personal',
@@ -2778,7 +3297,7 @@
         id: uid('obj'),
         type: 'pen',
         stroke: state.strokeColor,
-        strokeWidth: 2.5,
+        strokeWidth: state.penStrokeWidth || 2.5,
         points: [{ x: world.x, y: world.y }],
       };
       return;
@@ -2890,6 +3409,22 @@
       state.marquee.x2 = world.x;
       state.marquee.y2 = world.y;
       draw();
+      return;
+    }
+
+    if (state.rotating) {
+      const obj = state.objects.find((o) => o.id === state.rotating.id);
+      if (obj) {
+        const c = state.rotating.center;
+        const ang = Math.atan2(world.y - c.y, world.x - c.x);
+        let deg = state.rotating.origRotation + ((ang - state.rotating.startAngle) * 180) / Math.PI;
+        deg = ((Math.round(deg) % 360) + 360) % 360;
+        if (deg > 180) deg -= 360;
+        obj.rotation = deg;
+        emit('object-update', obj);
+        syncRotationUI(deg);
+        draw();
+      }
       return;
     }
 
@@ -3032,12 +3567,23 @@
       state.resizing = null;
       draw();
     }
+    if (state.rotating) {
+      const obj = state.objects.find((o) => o.id === state.rotating.id);
+      if (obj) emit('object-update', obj);
+      state.rotating = null;
+      draw();
+    }
     if (state.drawing) {
       let obj = state.drawing;
       state.drawing = null;
-      if (obj.type === 'pen' && (!obj.points || obj.points.length < 2)) {
-        setTool('select');
-        return draw();
+      if (obj.type === 'pen') {
+        if (!obj.points || obj.points.length < 2) {
+          return draw();
+        }
+        // Stay on pencil; defer commit until tool change
+        state.pendingPens.push(obj);
+        draw();
+        return;
       }
       if (SHAPE_TYPES.has(obj.type) && Math.abs(obj.w) < 4 && Math.abs(obj.h) < 4) {
         // default size click
@@ -3045,6 +3591,7 @@
         obj.h = obj.type === 'event' ? 50 : 80;
         if (obj.type === 'task') { obj.w = 120; obj.h = 70; }
         if (obj.type === 'cardLink') { obj.w = 160; obj.h = 100; }
+        if (DB_TYPES.has(obj.type)) { obj.w = 200; obj.h = 140; }
       }
       if (obj.type === 'cardLink') {
         if (Math.abs(obj.w) < 160) obj.w = (obj.w < 0 ? -1 : 1) * 160;
@@ -3055,6 +3602,7 @@
         return draw();
       }
       obj = normalizeShape(obj);
+      if (obj.rotation == null && ROTATABLE_TYPES.has(obj.type)) obj.rotation = 0;
       state.objects.push(obj);
       emit('object-add', obj);
       state.selectedIds = new Set([obj.id]);
@@ -3062,6 +3610,7 @@
       setTool('select');
       draw();
       if (obj.type === 'cardLink') openCardLinkPanel(obj);
+      if (DB_TYPES.has(obj.type)) queueInlineEdit(obj);
     }
   });
 
@@ -3073,6 +3622,7 @@
     }
     state.dragging = null;
     state.resizing = null;
+    state.rotating = null;
     state.drawing = null;
   });
 
@@ -3144,7 +3694,7 @@
 
   async function placeImageFromFile(file, worldX, worldY) {
     if (!file || !state.token || !state.roomId) return false;
-    if (!file.type || !file.type.startsWith('image/')) {
+    if (!looksLikeImageFile(file)) {
       toast('Выберите файл изображения');
       return false;
     }
@@ -3191,21 +3741,37 @@
     }
   }
 
+  function looksLikeImageFile(f) {
+    if (!f) return false;
+    if (f.type && f.type.startsWith('image/')) return true;
+    const name = String(f.name || '').toLowerCase();
+    return /\.(png|jpe?g|gif|webp|bmp)$/.test(name);
+  }
+
   function extractImageFilesFromDataTransfer(dt) {
     if (!dt) return [];
     const out = [];
-    if (dt.files && dt.files.length) {
-      for (const f of dt.files) {
-        if (f && f.type && f.type.startsWith('image/')) out.push(f);
-      }
-    }
-    if (!out.length && dt.items) {
+    const seen = new Set();
+    const push = (f) => {
+      if (!f || !looksLikeImageFile(f)) return;
+      const key = `${f.name}|${f.size}|${f.lastModified}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(f);
+    };
+    if (dt.items && dt.items.length) {
       for (const item of dt.items) {
-        if (item.kind === 'file' && item.type && item.type.startsWith('image/')) {
-          const f = item.getAsFile();
-          if (f) out.push(f);
+        if (item.kind === 'file') {
+          const t = item.type || '';
+          if (!t || t.startsWith('image/') || t === 'application/octet-stream') {
+            const f = item.getAsFile();
+            push(f);
+          }
         }
       }
+    }
+    if (dt.files && dt.files.length) {
+      for (const f of dt.files) push(f);
     }
     return out;
   }
@@ -3242,16 +3808,26 @@
   });
 
   window.addEventListener('paste', async (e) => {
+    if (!state.roomId) return;
     if (state.view !== 'canvas') return;
-    if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return;
-    const files = extractImageFilesFromDataTransfer(e.clipboardData);
+    const ae = document.activeElement;
+    // Allow paste on canvas even if a non-text control had focus; block only real typing surfaces
+    if (isTypingTarget(e.target) || isTypingTarget(ae)) {
+      const tag = (ae && ae.tagName) || '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (ae && ae.isContentEditable)) return;
+      if (state.inlineEdit) return;
+    }
+    const dt = e.clipboardData;
+    // Synchronously snapshot files before await (clipboardData expires)
+    const files = extractImageFilesFromDataTransfer(dt);
     if (!files.length) return;
     e.preventDefault();
+    e.stopPropagation();
     const pos = state.lastPointerWorld || viewportCenterWorld();
     for (const file of files) {
       await placeImageFromFile(file, pos.x, pos.y);
     }
-  });
+  }, true);
 
   // ---------- Kanban ----------
   function applyPersonalKanbanState(payload) {
@@ -3520,18 +4096,56 @@
     }
   }
 
+  function isMyChatMessage(msg) {
+    if (!msg) return false;
+    if (state.account && msg.accountId && msg.accountId === state.account.id) return true;
+    if (msg.userId && msg.userId === state.userId) return true;
+    return false;
+  }
+
+  function chatMessageIsRead(msg) {
+    if (!isMyChatMessage(msg)) return true;
+    const others = [...state.users.values()].filter((u) => u.id !== state.userId);
+    if (!others.length) return false;
+    // Another user moved mouse after this message
+    return !!(state.lastOtherCursorAt && state.lastOtherCursorAt >= (msg.ts || 0));
+  }
+
   function appendChatMessage(msg, scroll) {
     const el = document.createElement('div');
-    el.className = 'chat-msg';
+    el.className = 'chat-msg' + (isMyChatMessage(msg) ? ' mine' : '');
+    el.dataset.msgId = msg.id || '';
+    el.dataset.ts = String(msg.ts || 0);
+    const receipt = isMyChatMessage(msg)
+      ? (chatMessageIsRead(msg)
+        ? '<span class="chat-receipt read" title="Прочитано">✓✓</span>'
+        : '<span class="chat-receipt unread" title="Не прочитано">✓</span>')
+      : '';
     el.innerHTML = `
       <div class="chat-msg-meta">
         <span class="chat-msg-name" style="color:${msg.color || '#93c5fd'}">${escapeHtml(msg.name)}</span>
         <span class="chat-msg-time">${formatTime(msg.ts)}</span>
+        ${receipt}
       </div>
       <div class="chat-msg-text">${escapeHtml(msg.text)}</div>
     `;
     chatMessages.appendChild(el);
     if (scroll) chatMessages.scrollTop = chatMessages.scrollHeight;
+  }
+
+  function refreshChatReadReceipts() {
+    if (!chatMessages) return;
+    $$('.chat-msg.mine', chatMessages).forEach((el) => {
+      const ts = Number(el.dataset.ts || 0);
+      const read = !!(state.lastOtherCursorAt && state.lastOtherCursorAt >= ts)
+        && [...state.users.values()].some((u) => u.id !== state.userId);
+      const badge = el.querySelector('.chat-receipt');
+      if (!badge) return;
+      badge.classList.toggle('read', read);
+      badge.classList.toggle('unread', !read);
+      badge.title = read ? 'Прочитано' : 'Не прочитано';
+      badge.textContent = read ? '✓✓' : '✓';
+    });
   }
 
   function renderChat() {
@@ -3590,25 +4204,49 @@
     });
   }
 
+  function isFavoritesUser(u) {
+    return !!(u && (u.isFavorites || (state.account && u.id === state.account.id)));
+  }
+
   function renderDmUsers() {
     dmUsersEl.innerHTML = '';
-    if (!state.dmUsers.length) {
+    const users = state.dmUsers.slice();
+    // Ensure Избранные always present at top
+    if (state.account && !users.some((u) => u.id === state.account.id)) {
+      users.unshift({
+        id: state.account.id,
+        displayName: 'Избранные',
+        username: 'favorites',
+        isFavorites: true,
+        online: true,
+        unread: 0,
+        avatarUrl: state.account.avatarUrl || null,
+      });
+    }
+    users.sort((a, b) => {
+      const af = isFavoritesUser(a) ? 0 : 1;
+      const bf = isFavoritesUser(b) ? 0 : 1;
+      if (af !== bf) return af - bf;
+      return String(a.username || '').localeCompare(String(b.username || ''));
+    });
+    if (!users.length) {
       const empty = document.createElement('div');
       empty.className = 'dm-thread-head';
       empty.textContent = 'Пока нет других пользователей';
       dmUsersEl.appendChild(empty);
       return;
     }
-    for (const u of state.dmUsers) {
+    for (const u of users) {
+      const fav = isFavoritesUser(u);
       const btn = document.createElement('button');
       btn.type = 'button';
-      btn.className = 'dm-user' + (u.id === state.dmOtherId ? ' active' : '');
-      const label = escapeHtml(u.displayName || u.username);
-      const unread = u.unread > 0
+      btn.className = 'dm-user' + (u.id === state.dmOtherId ? ' active' : '') + (fav ? ' favorites' : '');
+      const label = fav ? '⭐ Избранные' : escapeHtml(u.displayName || u.username);
+      const unread = !fav && u.unread > 0
         ? `<span class="dm-user-unread">${u.unread > 99 ? '99+' : u.unread}</span>`
         : '';
-      const initial = escapeHtml(((u.displayName || u.username || '?').trim().charAt(0) || '?').toUpperCase());
-      const avatarHtml = u.avatarUrl
+      const initial = fav ? '⭐' : escapeHtml(((u.displayName || u.username || '?').trim().charAt(0) || '?').toUpperCase());
+      const avatarHtml = (!fav && u.avatarUrl)
         ? `<span class="user-avatar dm-user-avatar img-avatar"><img src="${escapeHtml(u.avatarUrl)}" alt="" /></span>`
         : `<span class="user-avatar dm-user-avatar">${initial}</span>`;
       btn.innerHTML = `
@@ -3625,9 +4263,10 @@
   function openDmThread(otherId) {
     state.dmOtherId = otherId;
     const u = state.dmUsers.find((x) => x.id === otherId);
-    dmThreadHead.textContent = u
-      ? `ЛС: ${u.displayName || u.username}`
-      : 'Личные сообщения';
+    const fav = isFavoritesUser(u) || (state.account && otherId === state.account.id);
+    dmThreadHead.textContent = fav
+      ? 'Избранные'
+      : (u ? `ЛС: ${u.displayName || u.username}` : 'Личные сообщения');
     dmInput.disabled = false;
     $('#dm-send-btn').disabled = false;
     renderDmUsers();
@@ -3818,6 +4457,268 @@
       emit('dm-mark-read', { otherId: state.dmOtherId });
     }
   });
+
+
+  // ---------- Room export / import ----------
+  function exportRoomData() {
+    if (!state.roomId) return toast('Нет активной комнаты');
+    const payload = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      roomId: state.roomId,
+      title: state.roomId,
+      visibility: state.roomVisibility || 'public',
+      camera: { ...state.camera },
+      objects: state.objects,
+      connectors: state.connectors,
+      columns: state.columns,
+      cards: state.cards,
+      messages: state.messages,
+      note: 'Изображения сохранены как URL (/uploads/…). При импорте на другой сервер их может понадобиться загрузить заново.',
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    const d = new Date();
+    const stamp = `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
+    a.href = URL.createObjectURL(blob);
+    a.download = `tarkventum-${state.roomId}-${stamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+    toast('Экспорт сохранён');
+  }
+
+  function importRoomData(file) {
+    if (!file || !state.roomId) return toast('Откройте комнату для импорта');
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(String(reader.result || ''));
+        if (!data || !Array.isArray(data.objects)) throw new Error('bad');
+        if (!confirm('Импортировать объекты в текущую комнату? Существующие объекты останутся.')) return;
+        for (const obj of data.objects) {
+          if (!obj || !obj.id) continue;
+          if (state.objects.find((o) => o.id === obj.id)) obj.id = uid('obj');
+          state.objects.push(obj);
+          emit('object-add', obj);
+        }
+        for (const conn of (data.connectors || [])) {
+          if (!conn || !conn.id) continue;
+          if (state.connectors.find((c) => c.id === conn.id)) conn.id = uid('conn');
+          state.connectors.push(conn);
+          emit('connector-add', conn);
+        }
+        draw();
+        toast('Импорт выполнен');
+      } catch {
+        toast('Не удалось прочитать файл экспорта');
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  // ---------- Public rooms list ----------
+  function renderPublicRoomsList(rooms) {
+    const lobbyList = $('#public-rooms-list');
+    const sideList = $('#public-rooms-side');
+    const renderInto = (el) => {
+      if (!el) return;
+      el.innerHTML = '';
+      if (!rooms.length) {
+        const p = document.createElement('p');
+        p.className = 'hint';
+        p.textContent = 'Пока нет открытых комнат';
+        el.appendChild(p);
+        return;
+      }
+      for (const r of rooms) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'public-room-item';
+        btn.innerHTML = `<span class="public-room-id">${escapeHtml(r.id)}</span>
+          <span class="public-room-meta">${r.userCount || 0} онлайн${r.ownerName ? ' · ' + escapeHtml(r.ownerName) : ''}</span>`;
+        btn.addEventListener('click', () => enterRoom(r.id, { addTab: true, create: false }));
+        el.appendChild(btn);
+      }
+    };
+    renderInto(lobbyList);
+    renderInto(sideList);
+  }
+
+  function refreshPublicRooms() {
+    if (state.socket && state.socket.connected) {
+      state.socket.emit('list-public-rooms', (res) => {
+        if (res && res.ok) renderPublicRoomsList(res.rooms || []);
+      });
+    } else if (state.token) {
+      api('/api/rooms/public').then(({ data }) => {
+        if (data && data.ok) renderPublicRoomsList(data.rooms || []);
+      }).catch(() => {});
+    }
+  }
+
+  // ---------- Room owner chrome / delete / members ----------
+  function updateRoomOwnerChrome() {
+    const delBtn = $('#btn-delete-room');
+    const memBtn = $('#btn-members');
+    const isOwner = state.myRoomRole === 'owner' || (state.account && state.roomOwnerId === state.account.id);
+    if (delBtn) delBtn.classList.toggle('hidden', !isOwner);
+    if (memBtn) memBtn.classList.toggle('hidden', state.roomVisibility !== 'private' && !isOwner);
+    renderMembersPanel();
+  }
+
+  function renderMembersPanel() {
+    const list = $('#members-list');
+    if (!list) return;
+    list.innerHTML = '';
+    const members = state.roomMembers || [];
+    if (!members.length) {
+      list.innerHTML = '<p class="hint">Нет участников</p>';
+      return;
+    }
+    const isOwner = state.myRoomRole === 'owner';
+    for (const m of members) {
+      const row = document.createElement('div');
+      row.className = 'member-row';
+      const roleLabel = m.role === 'owner' ? 'Владелец' : m.role === 'editor' ? 'Редактор' : m.role === 'admin' ? 'Админ' : 'Участник';
+      row.innerHTML = `<span class="member-name">${escapeHtml(m.displayName || m.username || m.userId)}</span>
+        <span class="member-role">${roleLabel}</span>`;
+      if (isOwner && m.role !== 'owner') {
+        const roleSel = document.createElement('select');
+        roleSel.innerHTML = '<option value="member">Участник</option><option value="editor">Редактор</option><option value="admin">Админ</option>';
+        roleSel.value = m.role === 'admin' || m.role === 'editor' ? m.role : 'member';
+        roleSel.addEventListener('change', () => {
+          emit('room-set-role', { roomId: state.roomId, userId: m.userId, role: roleSel.value }, (res) => {
+            if (!res || !res.ok) toast((res && res.error) || 'Ошибка');
+            else { state.roomMembers = res.members; renderMembersPanel(); }
+          });
+        });
+        const rm = document.createElement('button');
+        rm.type = 'button';
+        rm.className = 'btn ghost small';
+        rm.textContent = 'Удалить';
+        rm.addEventListener('click', () => {
+          if (!confirm('Удалить участника?')) return;
+          emit('room-remove-member', { roomId: state.roomId, userId: m.userId }, (res) => {
+            if (!res || !res.ok) toast((res && res.error) || 'Ошибка');
+            else { state.roomMembers = res.members; renderMembersPanel(); }
+          });
+        });
+        row.appendChild(roleSel);
+        row.appendChild(rm);
+      }
+      list.appendChild(row);
+    }
+  }
+
+  function deleteCurrentRoom() {
+    if (!state.roomId) return;
+    if (!confirm(`Удалить комнату «${state.roomId}» для всех? Это действие необратимо.`)) return;
+    emit('delete-room', { roomId: state.roomId }, (res) => {
+      if (!res || !res.ok) return toast((res && res.error) || 'Не удалось удалить');
+      toast('Комната удалена');
+      closeTab(state.roomId);
+      refreshPublicRooms();
+    });
+  }
+
+  // ---------- Profile modal ----------
+  function openProfileModal() {
+    const modal = $('#modal-profile');
+    if (!modal || !state.account) return;
+    $('#profile-display-name').value = state.account.displayName || '';
+    $('#profile-username').value = state.account.username || '';
+    $('#profile-password-current').value = '';
+    $('#profile-password-new').value = '';
+    $('#profile-password-confirm').value = '';
+    $('#profile-error').classList.add('hidden');
+    modal.classList.remove('hidden');
+  }
+  function closeProfileModal() {
+    const modal = $('#modal-profile');
+    if (modal) modal.classList.add('hidden');
+  }
+
+  async function saveProfile() {
+    const errEl = $('#profile-error');
+    const showErr = (t) => { if (errEl) { errEl.textContent = t; errEl.classList.remove('hidden'); } toast(t); };
+    const displayName = $('#profile-display-name').value.trim();
+    const username = $('#profile-username').value.trim();
+    const { res, data } = await api('/api/me', {
+      method: 'PATCH',
+      body: JSON.stringify({ displayName, username }),
+    });
+    if (!res.ok || !data || !data.ok) return showErr((data && data.error) || 'Не удалось сохранить профиль');
+    state.account = data.user;
+    localStorage.setItem(USER_KEY, JSON.stringify(data.user));
+    updateUserChrome();
+
+    const cur = $('#profile-password-current').value;
+    const neu = $('#profile-password-new').value;
+    const conf = $('#profile-password-confirm').value;
+    if (cur || neu || conf) {
+      if (neu !== conf) return showErr('Новый пароль и подтверждение не совпадают');
+      const pw = await api('/api/me/password', {
+        method: 'POST',
+        body: JSON.stringify({ currentPassword: cur, newPassword: neu }),
+      });
+      if (!pw.res.ok || !pw.data || !pw.data.ok) return showErr((pw.data && pw.data.error) || 'Не удалось сменить пароль');
+      toast('Пароль обновлён');
+    }
+    closeProfileModal();
+    toast('Профиль сохранён');
+  }
+
+  // Wire UI once DOM ready pieces exist
+  const btnExport = $('#btn-export-room');
+  if (btnExport) btnExport.addEventListener('click', exportRoomData);
+  const importInput = $('#import-room-file');
+  if (importInput) {
+    importInput.addEventListener('change', () => {
+      const f = importInput.files && importInput.files[0];
+      if (f) importRoomData(f);
+      importInput.value = '';
+    });
+  }
+  const btnImport = $('#btn-import-room');
+  if (btnImport && importInput) btnImport.addEventListener('click', () => importInput.click());
+  const btnDelRoom = $('#btn-delete-room');
+  if (btnDelRoom) btnDelRoom.addEventListener('click', deleteCurrentRoom);
+  const btnMembers = $('#btn-members');
+  if (btnMembers) btnMembers.addEventListener('click', () => {
+    const p = $('#members-panel');
+    if (p) p.classList.toggle('hidden');
+    renderMembersPanel();
+  });
+  const btnInvite = $('#members-invite-btn');
+  if (btnInvite) btnInvite.addEventListener('click', () => {
+    const username = ($('#members-invite-user') || {}).value || '';
+    const role = ($('#members-invite-role') || {}).value || 'member';
+    emit('room-invite', { roomId: state.roomId, username: username.trim(), role }, (res) => {
+      if (!res || !res.ok) return toast((res && res.error) || 'Не удалось пригласить');
+      state.roomMembers = res.members;
+      renderMembersPanel();
+      toast('Участник добавлен');
+      $('#members-invite-user').value = '';
+    });
+  });
+  const btnProfile = $('#btn-profile');
+  if (btnProfile) btnProfile.addEventListener('click', openProfileModal);
+  const profileSave = $('#profile-save');
+  if (profileSave) profileSave.addEventListener('click', () => { saveProfile(); });
+  const profileCancel = $('#profile-cancel');
+  if (profileCancel) profileCancel.addEventListener('click', closeProfileModal);
+  const profileAvatar = $('#profile-avatar-btn');
+  if (profileAvatar) profileAvatar.addEventListener('click', () => {
+    const inp = $('#avatar-file-input');
+    if (inp) inp.click();
+  });
+
+  // Periodic receipt refresh (idle threshold ~8s without other cursor → stay unread until move after msg)
+  setInterval(() => refreshChatReadReceipts(), 2000);
+
+  const membersClose = $('#members-panel-close');
+  if (membersClose) membersClose.addEventListener('click', () => $('#members-panel').classList.add('hidden'));
 
   function maybeAutoJoinRoom() {
     if (!pathMatch || !state.account) return;
