@@ -2262,8 +2262,11 @@
     const h = Math.abs(obj.h) || 120;
     const headerH = Math.min(28, Math.max(22, h * 0.22));
     const primary = meta.header;
-    const textCol = obj.textColor || getComputedStyle(document.documentElement).getPropertyValue('--text').trim() || '#e8eef7';
-    const muted = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#8b9bb4';
+    // Column names must stay readable on dark table body; obj.textColor is often
+    // the dark palette default (#1f2937) and disappears on the fill.
+    const muted = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#94a3b8';
+    const colNameColor = '#f1f5f9';
+    const colTypeColor = '#cbd5e1';
     const dashed = obj.type === 'dbView' || obj.type === 'dbSchema';
 
     ctx.fillStyle = obj.fill || 'rgba(14,165,233,0.08)';
@@ -2332,13 +2335,13 @@
       for (const col of cols) {
         if (yy + lh > y + h - 4) break;
         const isKey = !!(col.pk || col.unique);
-        ctx.fillStyle = isKey ? primary : textCol;
+        ctx.fillStyle = isKey ? '#7dd3fc' : colNameColor;
         ctx.font = `${isKey ? '600 ' : ''}${bodyFs}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
         let n = String(col.name || '');
         while (n.length > 1 && ctx.measureText(n).width > splitX - x - 14) n = n.slice(0, -1);
         if (n !== String(col.name || '') && n.length > 1) n = n.slice(0, -1) + '…';
         ctx.fillText(n || ' ', x + 10, yy);
-        ctx.fillStyle = muted;
+        ctx.fillStyle = colTypeColor;
         ctx.font = `${bodyFs}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
         let tp = String(col.type || '');
         while (tp.length > 1 && ctx.measureText(tp).width > x + w - splitX - 12) tp = tp.slice(0, -1);
@@ -2634,6 +2637,9 @@
             ctx.fill();
           }
         }
+        if (DB_COLUMN_TYPES.includes(obj.type) && (selected || hovered)) {
+          drawDbSettingsButton(obj, { active: selected });
+        }
       }
     }
     ctx.restore();
@@ -2884,6 +2890,85 @@
     const handleY = b.y - 4 - 18 / state.camera.scale;
     const hs = 10 / state.camera.scale;
     return Math.hypot(lx - cx, ly - handleY) <= hs;
+  }
+
+  function dbSettingsButtonLocal(obj) {
+    if (!obj || !DB_COLUMN_TYPES.includes(obj.type)) return null;
+    const b = boundsOfUnrotated(obj);
+    if (!b) return null;
+    const size = Math.max(16 / state.camera.scale, Math.min(22 / state.camera.scale, b.w * 0.12));
+    const pad = 5 / state.camera.scale;
+    return {
+      x: b.x + b.w - size - pad,
+      y: b.y + pad,
+      size,
+      cx: b.x + b.w - size / 2 - pad,
+      cy: b.y + pad + size / 2,
+    };
+  }
+
+  function hitDbSettingsButton(obj, wx, wy) {
+    const btn = dbSettingsButtonLocal(obj);
+    if (!btn) return false;
+    let lx = wx, ly = wy;
+    if (ROTATABLE_TYPES.has(obj.type) && (obj.rotation || 0)) {
+      const local = worldToLocal(obj, wx, wy);
+      lx = local.x; ly = local.y;
+    }
+    return lx >= btn.x && lx <= btn.x + btn.size && ly >= btn.y && ly <= btn.y + btn.size;
+  }
+
+  function findDbSettingsHit(wx, wy) {
+    const seen = new Set();
+    const candidates = [];
+    const push = (o) => {
+      if (!o || seen.has(o.id) || !DB_COLUMN_TYPES.includes(o.type)) return;
+      seen.add(o.id);
+      candidates.push(o);
+    };
+    if (state.selectedIds.size === 1) {
+      push(state.objects.find((o) => o.id === [...state.selectedIds][0]));
+    }
+    if (state.hoverId) push(state.objects.find((o) => o.id === state.hoverId));
+    push(hitTest(wx, wy));
+    for (const obj of candidates) {
+      if (hitDbSettingsButton(obj, wx, wy)) return obj;
+    }
+    return null;
+  }
+
+  function drawDbSettingsButton(obj, { active = false } = {}) {
+    const btn = dbSettingsButtonLocal(obj);
+    if (!btn) return;
+    const { cx, cy, size } = btn;
+    const r = size / 2;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fillStyle = active ? 'rgba(14,165,233,0.95)' : 'rgba(15,23,42,0.72)';
+    ctx.fill();
+    ctx.strokeStyle = active ? '#7dd3fc' : 'rgba(255,255,255,0.85)';
+    ctx.lineWidth = 1.2 / state.camera.scale;
+    ctx.stroke();
+    // simple gear: hub + teeth
+    ctx.strokeStyle = '#fff';
+    ctx.fillStyle = '#fff';
+    ctx.lineWidth = 1.4 / state.camera.scale;
+    const teeth = 8;
+    const outer = r * 0.72;
+    const inner = r * 0.42;
+    const hub = r * 0.22;
+    for (let i = 0; i < teeth; i++) {
+      const a = (i / teeth) * Math.PI * 2;
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(a) * inner, cy + Math.sin(a) * inner);
+      ctx.lineTo(cx + Math.cos(a) * outer, cy + Math.sin(a) * outer);
+      ctx.stroke();
+    }
+    ctx.beginPath();
+    ctx.arc(cx, cy, hub, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
   }
 
   function draw() {
@@ -3719,6 +3804,20 @@
     }
 
     if (state.tool === 'select') {
+      // DB table settings gear (hover/selected) → columns panel
+      if (e.button === 0) {
+        const gearObj = findDbSettingsHit(world.x, world.y);
+        if (gearObj) {
+          e.preventDefault();
+          e.stopPropagation();
+          state.selectedIds = new Set([gearObj.id]);
+          state.selectedConnectorIds.clear();
+          syncColorTargetFromSelection();
+          openDbColumnsPanel(gearObj);
+          draw();
+          return;
+        }
+      }
       // Rectangular marquee: RMB anywhere, or LMB on empty space (below)
       const rightBtn = e.button === 2 || (e.buttons & 2) === 2;
       if (rightBtn) {
@@ -4113,6 +4212,9 @@
         state.hoverId = newHover;
         state.hoverConnectorId = newHoverC;
         draw();
+      }
+      if (state.tool === 'select' && !state.dragging && !state.resizing && !state.rotating && !state.panning && !state.marquee) {
+        canvasWrap.style.cursor = findDbSettingsHit(world.x, world.y) ? 'pointer' : 'default';
       }
       if (state.tool === 'connector' && state.connectorFromId) {
         state._connectorPreview = world;
