@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Tarkventum — доска и Канбан</title>
   <link rel="icon" href="/favicon.png" type="image/png" />
-  <link rel="stylesheet" href="/css/styles.css?v=20260922d" />
+  <link rel="stylesheet" href="/css/styles.css?v=20260923a" />
 </head>
 <body>
   <!-- Auth overlay -->
@@ -174,6 +174,9 @@
             <button class="tool tool-room-link" data-tool="roomLink" title="Ссылка на комнату" type="button" aria-label="Ссылка на комнату">
               <span class="tool-room-link-ico" aria-hidden="true">🔗</span>
             </button>
+            <button class="tool tool-card-link" data-tool="cardLink" title="Ссылка на задачу канбана" type="button" aria-label="Ссылка на задачу канбана">
+              <span class="tool-card-link-ico" aria-hidden="true">📋</span>
+            </button>
             <div class="tool-sep"></div>
             <label class="color-pick" title="Цвет">
               <input id="stroke-color" type="color" value="#1f2937" />
@@ -204,6 +207,37 @@
               </div>
               <button id="room-link-expand" class="btn ghost" type="button" style="width:100%;margin-top:8px">Развернуть в схему</button>
               <p class="room-link-hint">Двойной клик по фигуре — открыть комнату. Alt+двойной клик — изменить.</p>
+            </div>
+            <div id="card-link-panel" class="room-link-panel card-link-panel hidden">
+              <div class="room-link-panel-head">
+                <strong>Ссылка на задачу</strong>
+                <button id="card-link-panel-close" class="btn ghost small" type="button" title="Закрыть">✕</button>
+              </div>
+              <label class="field">
+                <span>Доска</span>
+                <select id="card-link-board">
+                  <option value="personal">Личная</option>
+                  <option value="room">Комната</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Карточка</span>
+                <select id="card-link-card">
+                  <option value="">— не выбрана —</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Заголовок (необязательно)</span>
+                <input id="card-link-label" type="text" maxlength="80" placeholder="Название на холсте" autocomplete="off" />
+              </label>
+              <button id="card-link-create-card" class="btn ghost" type="button" style="width:100%;margin-bottom:8px">Создать карточку</button>
+              <div class="modal-actions">
+                <button id="card-link-open" class="btn" type="button">Открыть задачу</button>
+                <div class="spacer"></div>
+                <button id="card-link-save" class="btn primary" type="button">Сохранить</button>
+              </div>
+              <button id="card-link-close-btn" class="btn ghost" type="button" style="width:100%;margin-top:8px">Закрыть</button>
+              <p class="room-link-hint">Перетащите фигуры внутрь рамки, чтобы привязать к задаче. Двойной клик — открыть задачу. Alt+двойной клик — изменить.</p>
             </div>
             <div id="color-palette" class="color-palette" title="Цвет">
               <div class="palette-modes" role="tablist" aria-label="Цель цвета">
@@ -338,6 +372,6 @@
   <div id="toast" class="toast hidden"></div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/js/app.js?v=20260922d"></script>
+  <script src="/js/app.js?v=20260923a"></script>
 </body>
 </html>
