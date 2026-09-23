@@ -443,6 +443,55 @@ app.delete('/api/me/avatar', authMiddleware, (req, res) => {
   }
 });
 
+
+app.patch('/api/me', authMiddleware, (req, res) => {
+  try {
+    const user = findUserById(req.user.id);
+    if (!user) return res.status(401).json({ ok: false, error: 'Не авторизован' });
+    const body = req.body || {};
+    if (body.displayName != null) {
+      const dn = String(body.displayName || '').trim().slice(0, 48);
+      if (!dn) return res.status(400).json({ ok: false, error: 'Укажите отображаемое имя' });
+      user.displayName = dn;
+    }
+    if (body.username != null) {
+      const un = String(body.username || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 24);
+      if (un.length < 3) return res.status(400).json({ ok: false, error: 'Логин: минимум 3 символа (a-z, 0-9, _, -)' });
+      const taken = usersStore.users.find((u) => u.username === un && u.id !== user.id);
+      if (taken) return res.status(400).json({ ok: false, error: 'Такой логин уже занят' });
+      user.username = un;
+    }
+    saveUsersStore(usersStore);
+    res.json({ ok: true, user: publicUser(user) });
+  } catch (err) {
+    console.error('patch /api/me', err);
+    res.status(500).json({ ok: false, error: 'Ошибка сервера' });
+  }
+});
+
+app.post('/api/me/password', authMiddleware, async (req, res) => {
+  try {
+    const user = findUserById(req.user.id);
+    if (!user) return res.status(401).json({ ok: false, error: 'Не авторизован' });
+    const currentPassword = String((req.body && req.body.currentPassword) || '');
+    const newPassword = String((req.body && req.body.newPassword) || '');
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ ok: false, error: 'Укажите текущий и новый пароль' });
+    }
+    if (newPassword.length < 6) {
+      return res.status(400).json({ ok: false, error: 'Новый пароль: минимум 6 символов' });
+    }
+    const ok = await bcrypt.compare(currentPassword, user.passwordHash);
+    if (!ok) return res.status(400).json({ ok: false, error: 'Неверный текущий пароль' });
+    user.passwordHash = await bcrypt.hash(newPassword, 10);
+    saveUsersStore(usersStore);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('password change', err);
+    res.status(500).json({ ok: false, error: 'Ошибка сервера' });
+  }
+});
+
 app.post('/api/canvas-image', authMiddleware, (req, res) => {
   try {
     const image = req.body?.image;
@@ -484,6 +533,15 @@ app.post('/api/canvas-image', authMiddleware, (req, res) => {
   }
 });
 
+app.get('/api/rooms/public', authMiddleware, (req, res) => {
+  try {
+    res.json({ ok: true, rooms: listPublicRooms() });
+  } catch (err) {
+    console.error('rooms/public', err);
+    res.status(500).json({ ok: false, error: 'Ошибка сервера' });
+  }
+});
+
 app.get('/api/users', authMiddleware, (req, res) => {
   const list = usersStore.users
     .filter((u) => u.id !== req.user.id)
@@ -512,9 +570,13 @@ function normalizeRoomId(raw) {
   return String(raw || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 32);
 }
 
-function createRoom(id) {
+function createRoom(id, { ownerId = null, visibility = 'public', title = '' } = {}) {
   return {
     id,
+    title: String(title || '').slice(0, 80),
+    ownerId: ownerId || null,
+    visibility: visibility === 'private' ? 'private' : 'public',
+    members: [], // { userId, role: 'member'|'editor'|'admin' }
     objects: [],
     connectors: [],
     columns: DEFAULT_COLUMNS.map((c) => ({ ...c })),
@@ -524,9 +586,70 @@ function createRoom(id) {
   };
 }
 
-function getOrCreateRoom(roomId) {
-  if (!rooms.has(roomId)) rooms.set(roomId, createRoom(roomId));
+function getOrCreateRoom(roomId, opts) {
+  if (!rooms.has(roomId)) rooms.set(roomId, createRoom(roomId, opts || {}));
   return rooms.get(roomId);
+}
+
+function canAccessRoom(room, accountId) {
+  if (!room) return false;
+  if (room.visibility !== 'private') return true;
+  if (!accountId) return false;
+  if (room.ownerId && room.ownerId === accountId) return true;
+  const members = Array.isArray(room.members) ? room.members : [];
+  return members.some((m) => m && m.userId === accountId);
+}
+
+function getMemberRole(room, accountId) {
+  if (!room || !accountId) return null;
+  if (room.ownerId === accountId) return 'owner';
+  const members = Array.isArray(room.members) ? room.members : [];
+  const m = members.find((x) => x && x.userId === accountId);
+  return m ? (m.role || 'member') : null;
+}
+
+function membersPublic(room) {
+  const list = [];
+  if (room.ownerId) {
+    const u = findUserById(room.ownerId);
+    list.push({
+      userId: room.ownerId,
+      role: 'owner',
+      displayName: u ? (u.displayName || u.username) : 'Владелец',
+      username: u ? u.username : '',
+      avatarUrl: u ? avatarUrlFor(u) : null,
+    });
+  }
+  for (const m of (room.members || [])) {
+    if (!m || !m.userId || m.userId === room.ownerId) continue;
+    const u = findUserById(m.userId);
+    list.push({
+      userId: m.userId,
+      role: m.role || 'member',
+      displayName: u ? (u.displayName || u.username) : m.userId,
+      username: u ? u.username : '',
+      avatarUrl: u ? avatarUrlFor(u) : null,
+    });
+  }
+  return list;
+}
+
+function listPublicRooms() {
+  const out = [];
+  for (const room of rooms.values()) {
+    if (room.visibility === 'private') continue;
+    const owner = room.ownerId ? findUserById(room.ownerId) : null;
+    out.push({
+      id: room.id,
+      title: room.title || room.id,
+      visibility: 'public',
+      ownerId: room.ownerId || null,
+      ownerName: owner ? (owner.displayName || owner.username) : null,
+      userCount: room.users.size,
+    });
+  }
+  out.sort((a, b) => a.id.localeCompare(b.id));
+  return out;
 }
 
 function roomPublicState(room) {
@@ -536,6 +659,10 @@ function roomPublicState(room) {
     columns: room.columns,
     cards: room.cards,
     messages: room.messages,
+    ownerId: room.ownerId || null,
+    visibility: room.visibility || 'public',
+    title: room.title || '',
+    members: membersPublic(room),
     users: Array.from(room.users.values()).map((u) => ({
       id: u.id,
       accountId: u.accountId,
@@ -613,7 +740,7 @@ io.on('connection', (socket) => {
     currentRoom = null;
   }
 
-  socket.on('join-room', ({ roomId }, ack) => {
+  socket.on('join-room', ({ roomId, visibility, create, title } = {}, ack) => {
     try {
       if (!roomId || typeof roomId !== 'string') {
         if (typeof ack === 'function') ack({ ok: false, error: 'Неверный код комнаты' });
@@ -625,7 +752,24 @@ io.on('connection', (socket) => {
         return;
       }
       const displayName = (account.displayName || account.username).slice(0, 32);
-      const room = getOrCreateRoom(id);
+      const exists = rooms.has(id);
+      const wantPrivate = visibility === 'private';
+      if (!exists && (create || wantPrivate || visibility === 'public')) {
+        getOrCreateRoom(id, {
+          ownerId: account.id,
+          visibility: wantPrivate ? 'private' : 'public',
+          title: title || '',
+        });
+      }
+      const room = getOrCreateRoom(id, { ownerId: account.id, visibility: 'public' });
+      // First joiner becomes owner if missing
+      if (!room.ownerId) room.ownerId = account.id;
+      if (!room.visibility) room.visibility = 'public';
+
+      if (!canAccessRoom(room, account.id)) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Приватная комната: доступ только у владельца' });
+        return;
+      }
 
       if (currentRoom && currentRoom !== id) leaveCurrent();
 
@@ -650,6 +794,8 @@ io.on('connection', (socket) => {
           name: displayName,
           roomId: id,
           state: roomPublicState(room),
+          isOwner: room.ownerId === account.id,
+          myRole: getMemberRole(room, account.id),
         });
       }
       socket.to(id).emit('user-joined', {
@@ -659,8 +805,159 @@ io.on('connection', (socket) => {
         color,
         cursor: null,
       });
+      io.emit('public-rooms', listPublicRooms());
     } catch (err) {
       console.error('join-room error', err);
+      if (typeof ack === 'function') ack({ ok: false, error: 'Ошибка сервера' });
+    }
+  });
+
+  socket.on('list-public-rooms', (ack) => {
+    if (typeof ack === 'function') ack({ ok: true, rooms: listPublicRooms() });
+  });
+
+  socket.on('delete-room', ({ roomId } = {}, ack) => {
+    try {
+      const id = normalizeRoomId(roomId || currentRoom);
+      if (!id) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Неверный код комнаты' });
+        return;
+      }
+      const room = rooms.get(id);
+      if (!room) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Комната не найдена' });
+        return;
+      }
+      if (room.ownerId !== account.id) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Удалить может только владелец' });
+        return;
+      }
+      io.to(id).emit('room-deleted', { roomId: id });
+      for (const sid of Array.from(room.users.keys())) {
+        const sock = io.sockets.sockets.get(sid);
+        if (sock) {
+          try { sock.leave(id); } catch { /* ignore */ }
+        }
+      }
+      rooms.delete(id);
+      if (currentRoom === id) {
+        currentRoom = null;
+        userId = null;
+      }
+      io.emit('public-rooms', listPublicRooms());
+      if (typeof ack === 'function') ack({ ok: true, roomId: id });
+    } catch (err) {
+      console.error('delete-room', err);
+      if (typeof ack === 'function') ack({ ok: false, error: 'Ошибка сервера' });
+    }
+  });
+
+
+  socket.on('room-invite', ({ roomId, username, role } = {}, ack) => {
+    try {
+      const id = normalizeRoomId(roomId || currentRoom);
+      const room = rooms.get(id);
+      if (!room) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Комната не найдена' });
+        return;
+      }
+      const myRole = getMemberRole(room, account.id);
+      if (myRole !== 'owner' && myRole !== 'admin') {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Приглашать может владелец или админ' });
+        return;
+      }
+      const un = String(username || '').trim().toLowerCase();
+      const other = findUserByUsername(un);
+      if (!other) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Пользователь не найден' });
+        return;
+      }
+      if (other.id === room.ownerId) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Это владелец комнаты' });
+        return;
+      }
+      if (!Array.isArray(room.members)) room.members = [];
+      const existing = room.members.find((m) => m.userId === other.id);
+      const r = role === 'editor' || role === 'admin' ? role : 'member';
+      if (existing) existing.role = r;
+      else room.members.push({ userId: other.id, role: r });
+      io.to(id).emit('room-members', { roomId: id, members: membersPublic(room) });
+      emitToAccount(other.id, 'room-invite-notice', {
+        roomId: id,
+        title: room.title || id,
+        fromName: account.displayName || account.username,
+        role: r,
+      });
+      if (typeof ack === 'function') ack({ ok: true, members: membersPublic(room) });
+    } catch (err) {
+      console.error('room-invite', err);
+      if (typeof ack === 'function') ack({ ok: false, error: 'Ошибка сервера' });
+    }
+  });
+
+  socket.on('room-set-role', ({ roomId, userId, role } = {}, ack) => {
+    try {
+      const id = normalizeRoomId(roomId || currentRoom);
+      const room = rooms.get(id);
+      if (!room) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Комната не найдена' });
+        return;
+      }
+      if (getMemberRole(room, account.id) !== 'owner') {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Только владелец меняет роли' });
+        return;
+      }
+      if (!userId || userId === room.ownerId) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Нельзя изменить владельца' });
+        return;
+      }
+      if (!Array.isArray(room.members)) room.members = [];
+      const m = room.members.find((x) => x.userId === userId);
+      if (!m) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Участник не найден' });
+        return;
+      }
+      m.role = role === 'editor' || role === 'admin' ? role : 'member';
+      io.to(id).emit('room-members', { roomId: id, members: membersPublic(room) });
+      if (typeof ack === 'function') ack({ ok: true, members: membersPublic(room) });
+    } catch (err) {
+      console.error('room-set-role', err);
+      if (typeof ack === 'function') ack({ ok: false, error: 'Ошибка сервера' });
+    }
+  });
+
+  socket.on('room-remove-member', ({ roomId, userId } = {}, ack) => {
+    try {
+      const id = normalizeRoomId(roomId || currentRoom);
+      const room = rooms.get(id);
+      if (!room) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Комната не найдена' });
+        return;
+      }
+      if (getMemberRole(room, account.id) !== 'owner') {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Только владелец удаляет участников' });
+        return;
+      }
+      if (!userId || userId === room.ownerId) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'Нельзя удалить владельца' });
+        return;
+      }
+      room.members = (room.members || []).filter((m) => m.userId !== userId);
+      io.to(id).emit('room-members', { roomId: id, members: membersPublic(room) });
+      // kick if online in room
+      for (const [sid, u] of room.users.entries()) {
+        if (u.accountId === userId) {
+          const sock = io.sockets.sockets.get(sid);
+          if (sock) {
+            sock.emit('room-kicked', { roomId: id, reason: 'Вас удалили из комнаты' });
+            try { sock.leave(id); } catch { /* ignore */ }
+          }
+          room.users.delete(sid);
+        }
+      }
+      if (typeof ack === 'function') ack({ ok: true, members: membersPublic(room) });
+    } catch (err) {
+      console.error('room-remove-member', err);
       if (typeof ack === 'function') ack({ ok: false, error: 'Ошибка сервера' });
     }
   });
@@ -689,7 +986,15 @@ io.on('connection', (socket) => {
         ack({ ok: false, error: 'Неверный код комнаты' });
         return;
       }
-      const room = getOrCreateRoom(id);
+      const room = rooms.get(id);
+      if (!room) {
+        ack({ ok: false, error: 'Комната не найдена' });
+        return;
+      }
+      if (!canAccessRoom(room, account.id)) {
+        ack({ ok: false, error: 'Приватная комната' });
+        return;
+      }
       ack({
         ok: true,
         roomId: id,
@@ -1032,8 +1337,16 @@ io.on('connection', (socket) => {
         unread: getUnreadFor(account.id, u.id),
       }))
       .sort((a, b) => a.username.localeCompare(b.username));
+    const self = {
+      ...publicUser(findUserById(account.id) || account),
+      online: true,
+      unread: 0,
+      isFavorites: true,
+      displayName: 'Избранные',
+      username: 'favorites',
+    };
     if (typeof ack === 'function') {
-      ack({ ok: true, users: list, totalUnread: totalUnread(account.id) });
+      ack({ ok: true, users: [self, ...list], totalUnread: totalUnread(account.id), favoritesId: account.id });
     }
   });
 
@@ -1071,10 +1384,7 @@ io.on('connection', (socket) => {
         if (typeof ack === 'function') ack({ ok: false, error: 'Пользователь не найден' });
         return;
       }
-      if (other.id === account.id) {
-        if (typeof ack === 'function') ack({ ok: false, error: 'Нельзя писать себе' });
-        return;
-      }
+      const isFavorites = other.id === account.id;
       const msgText = String(text || '').trim().slice(0, 1000);
       if (!msgText) {
         if (typeof ack === 'function') ack({ ok: false, error: 'Пустое сообщение' });
@@ -1086,24 +1396,29 @@ io.on('connection', (socket) => {
         id: genId('dm'),
         fromId: account.id,
         toId: other.id,
-        fromName: account.displayName || account.username,
+        fromName: isFavorites ? 'Избранные' : (account.displayName || account.username),
         text: msgText,
         ts: Date.now(),
+        favorites: isFavorites || undefined,
       };
       dmsStore.threads[key].push(message);
       if (dmsStore.threads[key].length > MAX_DM_THREAD) {
         dmsStore.threads[key] = dmsStore.threads[key].slice(-MAX_DM_THREAD);
       }
-      bumpUnread(other.id, account.id);
+      if (!isFavorites) {
+        bumpUnread(other.id, account.id);
+      }
       saveDmsStore(dmsStore);
 
       socket.emit('dm-message', message);
-      emitToAccount(other.id, 'dm-message', message);
-      emitToAccount(other.id, 'dm-unread', {
-        otherId: account.id,
-        unread: getUnreadFor(other.id, account.id),
-        totalUnread: totalUnread(other.id),
-      });
+      if (!isFavorites) {
+        emitToAccount(other.id, 'dm-message', message);
+        emitToAccount(other.id, 'dm-unread', {
+          otherId: account.id,
+          unread: getUnreadFor(other.id, account.id),
+          totalUnread: totalUnread(other.id),
+        });
+      }
 
       if (typeof ack === 'function') ack({ ok: true, message });
     } catch (err) {
