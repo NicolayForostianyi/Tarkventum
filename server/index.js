@@ -11,6 +11,22 @@ const MAX_CHAT = 100;
 const MAX_DM_THREAD = 500;
 const JWT_SECRET = process.env.JWT_SECRET || 'tarkventum-dev-secret-change-me';
 const JWT_EXPIRES = process.env.JWT_EXPIRES || '30d';
+
+// App-level administrators (not the same as room role "admin").
+// Override with env TARKVENTUM_ADMINS=user1,user2 (comma-separated, case-insensitive).
+const ADMIN_USERNAMES = (process.env.TARKVENTUM_ADMINS || 'DoTenN')
+  .split(',')
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
+
+function isAppAdmin(userOrUsername) {
+  if (!userOrUsername) return false;
+  const un = String(
+    typeof userOrUsername === 'string' ? userOrUsername : (userOrUsername.username || '')
+  ).trim().toLowerCase();
+  return !!un && ADMIN_USERNAMES.includes(un);
+}
+
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const DMS_FILE = path.join(DATA_DIR, 'dms.json');
@@ -193,6 +209,7 @@ function publicUser(u) {
     username: u.username,
     displayName: u.displayName || u.username,
     avatarUrl: avatarUrlFor(u),
+    isAdmin: isAppAdmin(u),
   };
 }
 
@@ -828,7 +845,15 @@ io.on('connection', (socket) => {
         if (typeof ack === 'function') ack({ ok: false, error: 'Комната не найдена' });
         return;
       }
-      if (room.ownerId !== account.id) {
+      const isOwner = room.ownerId === account.id;
+      const admin = isAppAdmin(account);
+      const isPublic = (room.visibility || 'public') !== 'private';
+      if (isPublic) {
+        if (!admin) {
+          if (typeof ack === 'function') ack({ ok: false, error: 'Открытую комнату может удалить только администратор приложения' });
+          return;
+        }
+      } else if (!isOwner && !admin) {
         if (typeof ack === 'function') ack({ ok: false, error: 'Удалить может только владелец' });
         return;
       }
