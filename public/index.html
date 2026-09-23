@@ -5,15 +5,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Tarkventum — доска и Канбан</title>
   <link rel="icon" href="/favicon.png" type="image/png" />
-  <link rel="stylesheet" href="/css/styles.css?v=20260923a" />
+  <link rel="stylesheet" href="/css/styles.css?v=20260923d" />
 </head>
 <body>
   <!-- Auth overlay -->
   <div id="auth-screen" class="lobby">
     <div class="lobby-card auth-card">
-      <div class="logo">
-        <img class="logo-mark" src="/logo-mark.png" alt="" />
-        <h1>arkventum</h1>
+      <div class="logo auth-logo">
+        <div class="logo-mark-wrap" aria-hidden="true">
+          <span class="logo-glow"></span>
+          <img class="logo-mark" src="/logo-mark.png" alt="" />
+        </div>
+        <h1>Tarkventum</h1>
       </div>
       <p class="tagline">Войдите или зарегистрируйтесь, чтобы пользоваться доской и личными сообщениями</p>
 
@@ -64,7 +67,7 @@
     <div class="lobby-card">
       <div class="logo">
         <img class="logo-mark" src="/logo-mark.png" alt="" />
-        <h1>arkventum</h1>
+        <h1>Tarkventum</h1>
       </div>
       <p class="tagline">Совместная доска, диаграммы и Канбан в реальном времени</p>
       <p class="auth-user-line">
@@ -91,12 +94,21 @@
           <option value="gold">Золотая</option>
         </select>
       </label>
+      <fieldset class="field room-visibility-field">
+        <legend>Тип комнаты при создании</legend>
+        <label class="radio-inline"><input type="radio" name="room-visibility" value="public" checked /> Открытая</label>
+        <label class="radio-inline"><input type="radio" name="room-visibility" value="private" /> Приватная</label>
+      </fieldset>
       <div class="lobby-actions">
         <button id="btn-create" class="btn primary" type="button">Создать комнату</button>
         <button id="btn-join" class="btn" type="button">Войти в комнату</button>
       </div>
       <p id="lobby-error" class="error hidden"></p>
       <p class="hint">Ссылка вида <code>/r/код</code> тоже открывает комнату</p>
+      <div class="public-rooms-block">
+        <h3 class="public-rooms-title">Открытые комнаты</h3>
+        <div id="public-rooms-list" class="public-rooms-list"></div>
+      </div>
     </div>
   </div>
 
@@ -110,9 +122,14 @@
 
     <header class="topbar">
       <div class="topbar-left">
-        <span class="brand"><img class="brand-logo" src="/logo-mark.png" alt="" /><span class="brand-text">arkventum</span></span>
+        <span class="brand"><img class="brand-logo" src="/logo-mark.png" alt="" /><span class="brand-text">Tarkventum</span></span>
         <span class="room-badge" id="room-badge"></span>
         <button id="btn-copy-link" class="btn ghost small" type="button" title="Скопировать ссылку">Ссылка</button>
+        <button id="btn-export-room" class="btn ghost small" type="button" title="Экспорт комнаты в JSON">Экспорт</button>
+        <button id="btn-import-room" class="btn ghost small" type="button" title="Импорт JSON в комнату">Импорт</button>
+        <input id="import-room-file" type="file" accept="application/json,.json" hidden />
+        <button id="btn-members" class="btn ghost small hidden" type="button" title="Участники">Участники</button>
+        <button id="btn-delete-room" class="btn ghost small danger hidden" type="button" title="Удалить комнату">Удалить комнату</button>
       </div>
       <div class="view-tabs">
         <button id="tab-canvas" class="tab active" type="button" data-view="canvas">Холст</button>
@@ -136,6 +153,7 @@
           <span class="user-avatar" id="user-chip-avatar" hidden></span>
           <span class="user-chip-name" id="user-chip-name"></span>
         </button>
+        <button id="btn-profile" class="btn ghost small" type="button" title="Профиль">Профиль</button>
         <input type="file" id="avatar-file-input" accept="image/*" hidden />
         <div id="presence" class="presence"></div>
         <button id="btn-leave" class="btn ghost small" type="button">К комнатам</button>
@@ -164,6 +182,17 @@
               <button class="tool" data-tool="task" title="BPMN: задача" type="button">▢</button>
               <button class="tool" data-tool="gateway" title="BPMN: шлюз" type="button">◇</button>
               <button class="tool" data-tool="event" title="BPMN: событие" type="button">⬭</button>
+            </div>
+            <div class="tool-group tool-group-db" title="База данных">
+              <span class="tool-group-label">БД</span>
+              <button class="tool" data-tool="dbTable" title="Таблица" type="button">▤</button>
+              <button class="tool" data-tool="dbView" title="Представление" type="button">▥</button>
+              <button class="tool" data-tool="dbSchema" title="Схема" type="button">⧉</button>
+              <button class="tool" data-tool="dbDatabase" title="База данных" type="button">🗄</button>
+              <button class="tool" data-tool="dbIndex" title="Индекс" type="button">⌕</button>
+              <button class="tool" data-tool="dbProcedure" title="Процедура / функция" type="button">ƒ</button>
+              <button class="tool" data-tool="dbTrigger" title="Триггер" type="button">⚡</button>
+              <button class="tool" data-tool="dbEnum" title="Тип / Enum" type="button">⟨⟩</button>
             </div>
             <div class="tool-sep"></div>
             <button class="tool" data-tool="connector" title="Соединитель (C)" type="button">⟷</button>
@@ -265,6 +294,17 @@
                 <input id="font-size-input" type="number" min="10" max="72" value="18" step="1" />
                 <button type="button" id="font-size-inc" class="palette-size-btn" aria-label="Увеличить размер">+</button>
               </div>
+              <div class="palette-size" title="Толщина пера">
+                <span class="palette-size-label">Толщина</span>
+                <button type="button" id="pen-width-dec" class="palette-size-btn" aria-label="Уменьшить толщину">−</button>
+                <input id="pen-width-input" type="number" min="1" max="32" value="2.5" step="0.5" />
+                <button type="button" id="pen-width-inc" class="palette-size-btn" aria-label="Увеличить толщину">+</button>
+              </div>
+              <div class="palette-size" title="Угол поворота">
+                <span class="palette-size-label">Угол</span>
+                <input id="rotation-input" type="number" min="-180" max="360" value="0" step="1" />
+                <span class="palette-size-label">°</span>
+              </div>
             </div>
 <div id="zoom-label" class="zoom-label">100%</div>
             <div id="connector-hint" class="connector-hint hidden">Выберите фигуру-источник, затем фигуру-цель</div>
@@ -319,6 +359,10 @@
       <!-- Chat / DM sidebar -->
       <aside class="chat-panel" id="chat-panel">
         <div class="chat-header">
+          <div class="public-rooms-side-wrap">
+            <div class="public-rooms-title">Открытые комнаты</div>
+            <div id="public-rooms-side" class="public-rooms-list compact"></div>
+          </div>
           <div class="side-tabs">
             <button type="button" class="side-tab active" id="side-tab-chat" data-side="chat">Чат</button>
             <button type="button" class="side-tab" id="side-tab-dm" data-side="dm">
@@ -372,6 +416,48 @@
   <div id="toast" class="toast hidden"></div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/js/app.js?v=20260923a"></script>
+
+    <div id="members-panel" class="members-panel hidden">
+      <div class="members-panel-head">
+        <strong>Участники</strong>
+        <button type="button" class="btn ghost small" id="members-panel-close" title="Закрыть">✕</button>
+      </div>
+      <div id="members-list" class="members-list"></div>
+      <div class="members-invite">
+        <label class="field">
+          <span>Пригласить (логин)</span>
+          <input id="members-invite-user" type="text" maxlength="24" placeholder="username" autocomplete="off" />
+        </label>
+        <label class="field">
+          <span>Роль</span>
+          <select id="members-invite-role">
+            <option value="member">Участник</option>
+            <option value="editor">Редактор</option>
+            <option value="admin">Админ</option>
+          </select>
+        </label>
+        <button id="members-invite-btn" class="btn primary" type="button">Пригласить</button>
+      </div>
+    </div>
+
+    <div id="modal-profile" class="modal hidden">
+      <div class="modal-card">
+        <h3>Профиль</h3>
+        <label class="field"><span>Отображаемое имя</span><input id="profile-display-name" type="text" maxlength="48" /></label>
+        <label class="field"><span>Логин</span><input id="profile-username" type="text" maxlength="24" /></label>
+        <button id="profile-avatar-btn" class="btn" type="button">Сменить аватар</button>
+        <hr class="modal-sep" />
+        <label class="field"><span>Текущий пароль</span><input id="profile-password-current" type="password" autocomplete="current-password" /></label>
+        <label class="field"><span>Новый пароль</span><input id="profile-password-new" type="password" autocomplete="new-password" /></label>
+        <label class="field"><span>Подтверждение</span><input id="profile-password-confirm" type="password" autocomplete="new-password" /></label>
+        <p id="profile-error" class="error hidden"></p>
+        <div class="modal-actions">
+          <button id="profile-cancel" class="btn ghost" type="button">Отмена</button>
+          <button id="profile-save" class="btn primary" type="button">Сохранить</button>
+        </div>
+      </div>
+    </div>
+
+  <script src="/js/app.js?v=20260923d"></script>
 </body>
 </html>
