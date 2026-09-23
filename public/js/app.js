@@ -1115,17 +1115,18 @@
     if (obj.type === 'sticky') return 14;
     if (obj.type === 'gateway' || obj.type === 'event') return 12;
     if (obj.type === 'roomLink' || obj.type === 'cardLink') return 14;
+    if (obj.type === 'arrow' || obj.type === 'line') return 14;
     return 13;
   }
 
   const TEXT_COLOR_TYPES = new Set([
     'rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event',
-    'sticky', 'text', 'roomLink', 'cardLink',
+    'sticky', 'text', 'roomLink', 'cardLink', 'line', 'arrow',
     'dbTable', 'dbView', 'dbSchema', 'dbDatabase', 'dbIndex', 'dbProcedure', 'dbTrigger', 'dbEnum',
   ]);
   const FONT_SIZE_TYPES = new Set([
     'rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event',
-    'sticky', 'text', 'roomLink', 'cardLink',
+    'sticky', 'text', 'roomLink', 'cardLink', 'line', 'arrow',
     'dbTable', 'dbView', 'dbSchema', 'dbDatabase', 'dbIndex', 'dbProcedure', 'dbTrigger', 'dbEnum',
   ]);
 
@@ -1134,14 +1135,28 @@
     return !!(obj && (obj.type === 'text' || obj.type === 'sticky'));
   }
 
-  /** Auto-pick palette mode from selection: text/sticky → text color, shapes → figure color. */
+  /** Auto-pick palette mode from selection: text/sticky → text color, shapes/arrows → figure color. */
   function syncColorTargetFromSelection() {
     const objs = [...state.selectedIds]
       .map((id) => state.objects.find((o) => o.id === id))
       .filter(Boolean);
+    const conns = [...state.selectedConnectorIds]
+      .map((id) => state.connectors.find((c) => c.id === id))
+      .filter(Boolean);
+
+    // Connectors (arrow links between shapes): always figure/stroke color
+    if (!objs.length && conns.length) {
+      state.colorTarget = 'shape';
+      if (conns.length === 1 && conns[0].stroke) state.strokeColor = conns[0].stroke;
+      syncColorUI();
+      syncRotationUI();
+      return;
+    }
     if (!objs.length) return;
 
-    const target = objs.every(isTextPrimaryObject) ? 'text' : 'shape';
+    // Arrows/lines/pens are stroke-primary — never auto-switch to text color on click
+    const strokePrimary = (o) => o && (o.type === 'arrow' || o.type === 'line' || o.type === 'pen');
+    const target = objs.every(isTextPrimaryObject) && !objs.some(strokePrimary) ? 'text' : 'shape';
     state.colorTarget = target;
 
     if (objs.length === 1) {
@@ -2461,6 +2476,26 @@
       ctx.lineTo(obj.x2, obj.y2);
       ctx.stroke();
       if (obj.type === 'arrow') drawArrowHead(obj.x1, obj.y1, obj.x2, obj.y2, obj.stroke || '#1f2937');
+      const arrowLabel = (obj.label || '').trim();
+      const editingThis = state.inlineEdit && state.inlineEdit.id === obj.id;
+      if (arrowLabel && !editingThis) {
+        const mx = (obj.x1 + obj.x2) / 2;
+        const my = (obj.y1 + obj.y2) / 2;
+        const adx = obj.x2 - obj.x1;
+        const ady = obj.y2 - obj.y1;
+        const alen = Math.hypot(adx, ady) || 1;
+        // slight offset perpendicular "above" the segment
+        const off = 12;
+        const lx = mx + (-ady / alen) * off;
+        const ly = my + (adx / alen) * off;
+        ctx.fillStyle = objectTextColor(obj);
+        ctx.font = `${objectFontSize(obj)}px Segoe UI, system-ui, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(arrowLabel, lx, ly);
+        ctx.textAlign = 'start';
+        ctx.textBaseline = 'alphabetic';
+      }
     } else if (obj.type === 'roomLink') {
       const x = Math.min(obj.x, obj.x + obj.w);
       const y = Math.min(obj.y, obj.y + obj.h);
@@ -3416,8 +3451,9 @@
 
   function startInlineEdit(obj) {
     if (!obj) return;
-    const shapeLabelTypes = ['task', 'gateway', 'event', 'rect', 'square', 'circle', 'ellipse'];
+    const shapeLabelTypes = ['task', 'gateway', 'event', 'rect', 'square', 'circle', 'ellipse', 'arrow', 'line'];
     const isDb = DB_TYPES.has(obj.type);
+    const isArrowLike = obj.type === 'arrow' || obj.type === 'line';
     if (obj.type !== 'text' && obj.type !== 'sticky' && !shapeLabelTypes.includes(obj.type) && !isDb) {
       return;
     }
@@ -3426,24 +3462,42 @@
     syncFontSizeUI(objectFontSize(obj));
     syncColorUI(state.textColor);
     cancelInlineEdit(true);
-    const b = boundsOfUnrotated(obj) || boundsOf(obj);
-    if (!b) return;
-    const headerH = isDb ? Math.min(28, Math.max(22, b.h * 0.22)) : b.h;
-    const editTop = isDb ? b.y : b.y;
-    const editH = isDb ? headerH : b.h;
-    const tl = screenFromWorld(b.x, editTop);
-    const br = screenFromWorld(b.x + b.w, editTop + editH);
+    const editFs = objectFontSize(obj);
+    let tl, br;
+    if (isArrowLike) {
+      // Edit box centered on midpoint, slightly above the segment
+      const mx = (obj.x1 + obj.x2) / 2;
+      const my = (obj.y1 + obj.y2) / 2;
+      const adx = obj.x2 - obj.x1;
+      const ady = obj.y2 - obj.y1;
+      const alen = Math.hypot(adx, ady) || 1;
+      const off = 12;
+      const lx = mx + (-ady / alen) * off;
+      const ly = my + (adx / alen) * off;
+      const editW = Math.max(120, Math.min(280, 40 + String(obj.label || '').length * editFs * 0.55));
+      const editH = Math.max(28, editFs * 1.5);
+      tl = screenFromWorld(lx - editW / 2, ly - editH / 2);
+      br = screenFromWorld(lx + editW / 2, ly + editH / 2);
+    } else {
+      const b = boundsOfUnrotated(obj) || boundsOf(obj);
+      if (!b) return;
+      const headerH = isDb ? Math.min(28, Math.max(22, b.h * 0.22)) : b.h;
+      const editTop = isDb ? b.y : b.y;
+      const editH = isDb ? headerH : b.h;
+      tl = screenFromWorld(b.x, editTop);
+      br = screenFromWorld(b.x + b.w, editTop + editH);
+    }
     inlineEditEl.classList.remove('hidden');
     inlineEditEl.classList.toggle('sticky-edit', obj.type === 'sticky' || (isDb && false));
     inlineEditEl.style.left = `${tl.x}px`;
     inlineEditEl.style.top = `${tl.y}px`;
     inlineEditEl.style.width = `${Math.max(80, br.x - tl.x)}px`;
     inlineEditEl.style.height = `${Math.max(isDb ? 24 : 28, br.y - tl.y)}px`;
-    const editFs = objectFontSize(obj);
     inlineEditEl.style.fontSize = `${editFs * state.camera.scale}px`;
     inlineEditEl.style.color = isDb ? '#ffffff' : objectTextColor(obj);
-    inlineEditEl.style.background = isDb ? 'rgba(0,0,0,0.35)' : '';
+    inlineEditEl.style.background = isDb ? 'rgba(0,0,0,0.35)' : (isArrowLike ? 'rgba(0,0,0,0.55)' : '');
     inlineEditEl.style.zIndex = '30';
+    inlineEditEl.style.textAlign = isArrowLike ? 'center' : '';
 
     const initial = obj.type === 'text' || obj.type === 'sticky'
       ? (obj.text || '')
@@ -3478,10 +3532,13 @@
     inlineEditEl.classList.add('hidden');
     inlineEditEl.textContent = '';
     inlineEditEl.style.background = '';
+    inlineEditEl.style.textAlign = '';
     if (!obj) return;
     if (field === 'text') obj.text = value;
     else obj.label = value;
     emit('object-update', obj);
+    // After editing an arrow/line label, return palette to figure/stroke mode
+    if (obj.type === 'arrow' || obj.type === 'line') syncColorTargetFromSelection();
     draw();
   }
 
@@ -3495,6 +3552,8 @@
     inlineEditIgnoreBlurUntil = 0;
     inlineEditEl.classList.add('hidden');
     inlineEditEl.textContent = '';
+    inlineEditEl.style.background = '';
+    inlineEditEl.style.textAlign = '';
     if (!silent) draw();
   }
 
@@ -3798,6 +3857,7 @@
       state.connectorFromId = null;
       state.selectedConnectorIds = new Set([conn.id]);
       state.selectedIds.clear();
+      syncColorTargetFromSelection();
       connectorHint.textContent = 'Выберите фигуру-источник, затем фигуру-цель';
       draw();
       return;
@@ -3940,6 +4000,7 @@
           state.selectedConnectorIds.clear();
         }
         state.selectedConnectorIds.add(hitConn.id);
+        syncColorTargetFromSelection();
         draw();
         return;
       } else {
@@ -4010,6 +4071,9 @@
         y2: world.y,
         stroke: state.strokeColor,
         strokeWidth: 2,
+        label: '',
+        textColor: state.textColor,
+        fontSize: state.fontSize || 14,
       };
       return;
     }
