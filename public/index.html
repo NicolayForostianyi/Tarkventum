@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Tarkventum — доска и Канбан</title>
   <link rel="icon" href="/favicon.png" type="image/png" />
-  <link rel="stylesheet" href="/css/styles.css?v=20260923d" />
+  <link rel="stylesheet" href="/css/styles.css?v=20260923g" />
 </head>
 <body>
   <!-- Auth overlay -->
@@ -105,8 +105,8 @@
       </div>
       <p id="lobby-error" class="error hidden"></p>
       <p class="hint">Ссылка вида <code>/r/код</code> тоже открывает комнату</p>
-      <div class="public-rooms-block">
-        <h3 class="public-rooms-title">Открытые комнаты</h3>
+      <div class="public-rooms-block hidden" id="lobby-public-rooms">
+        <h3 class="public-rooms-title">Подходящие открытые комнаты</h3>
         <div id="public-rooms-list" class="public-rooms-list"></div>
       </div>
     </div>
@@ -125,7 +125,8 @@
         <span class="brand"><img class="brand-logo" src="/logo-mark.png" alt="" /><span class="brand-text">Tarkventum</span></span>
         <span class="room-badge" id="room-badge"></span>
         <button id="btn-copy-link" class="btn ghost small" type="button" title="Скопировать ссылку">Ссылка</button>
-        <button id="btn-export-room" class="btn ghost small" type="button" title="Экспорт комнаты в JSON">Экспорт</button>
+        <button id="btn-export-room" class="btn ghost small" type="button" title="Экспорт комнаты в JSON">Экспорт JSON</button>
+        <button id="btn-export-scheme" class="btn ghost small" type="button" title="Экспорт схемы холста в PNG/PDF">Экспорт схемы</button>
         <button id="btn-import-room" class="btn ghost small" type="button" title="Импорт JSON в комнату">Импорт</button>
         <input id="import-room-file" type="file" accept="application/json,.json" hidden />
         <button id="btn-members" class="btn ghost small hidden" type="button" title="Участники">Участники</button>
@@ -166,51 +167,114 @@
         <!-- Canvas view -->
         <section id="view-canvas" class="view view-canvas">
           <aside class="toolbar" id="toolbar">
-            <button class="tool active" data-tool="select" title="Выделение (V)" type="button">↖</button>
-            <button class="tool" data-tool="pan" title="Рука / панорама (H)" type="button">✋</button>
-            <button class="tool" data-tool="pen" title="Перо (P)" type="button">✎</button>
-            <div class="tool-sep"></div>
-            <div class="tool-group" title="Фигуры">
-              <span class="tool-group-label">фиг</span>
-              <button class="tool" data-tool="rect" title="Прямоугольник (R)" type="button">▭</button>
-              <button class="tool" data-tool="square" title="Квадрат" type="button">□</button>
-              <button class="tool" data-tool="circle" title="Круг" type="button">○</button>
-              <button class="tool" data-tool="ellipse" title="Эллипс / овал (O)" type="button">◯</button>
+            <div class="toolbar-primary">
+              <button class="tool active" data-tool="select" title="Выделение (V)" type="button">↖</button>
+              <button class="tool" data-tool="pan" title="Рука / панорама (H)" type="button">✋</button>
+              <button class="tool" data-tool="pen" title="Перо (P)" type="button">✎</button>
+              <button class="tool" data-tool="sticky" title="Стикер (S)" type="button">🗒</button>
+              <button class="tool" data-tool="text" title="Текст (T)" type="button">T</button>
+              <button class="tool" data-tool="connector" title="Соединитель (C)" type="button">⟷</button>
+              <div class="tool-sep"></div>
+              <div class="tool-tile" data-group="shapes" title="Фигуры">
+                <button class="tool tool-tile-btn" type="button" data-group-toggle="shapes" aria-label="Фигуры">
+                  <span class="tool-tile-ico">▭</span>
+                  <span class="tool-tile-label">фиг</span>
+                </button>
+                <div class="tool-popover hidden" data-group-panel="shapes">
+                  <button class="tool" data-tool="rect" title="Прямоугольник (R)" type="button">▭</button>
+                  <button class="tool" data-tool="square" title="Квадрат" type="button">□</button>
+                  <button class="tool" data-tool="circle" title="Круг" type="button">○</button>
+                  <button class="tool" data-tool="ellipse" title="Эллипс / овал (O)" type="button">◯</button>
+                </div>
+              </div>
+              <div class="tool-tile tool-tile-bpmn" data-group="bpmn" title="BPMN">
+                <button class="tool tool-tile-btn" type="button" data-group-toggle="bpmn" aria-label="BPMN">
+                  <span class="tool-tile-ico">◇</span>
+                  <span class="tool-tile-label">bpmn</span>
+                </button>
+                <div class="tool-popover hidden" data-group-panel="bpmn">
+                  <button class="tool" data-tool="task" title="BPMN: задача" type="button">▢</button>
+                  <button class="tool" data-tool="gateway" title="BPMN: шлюз" type="button">◇</button>
+                  <button class="tool" data-tool="event" title="BPMN: событие" type="button">⬭</button>
+                </div>
+              </div>
+              <div class="tool-tile tool-tile-db" data-group="db" title="База данных">
+                <button class="tool tool-tile-btn" type="button" data-group-toggle="db" aria-label="База данных">
+                  <span class="tool-tile-ico">▤</span>
+                  <span class="tool-tile-label">БД</span>
+                </button>
+                <div class="tool-popover hidden" data-group-panel="db">
+                  <button class="tool" data-tool="dbTable" title="Таблица" type="button">▤</button>
+                  <button class="tool" data-tool="dbView" title="Представление" type="button">▥</button>
+                  <button class="tool" data-tool="dbEnum" title="Тип / Enum" type="button">⟨⟩</button>
+                  <button class="tool" data-tool="dbSchema" title="Схема" type="button">⧉</button>
+                  <button class="tool" data-tool="dbDatabase" title="База данных" type="button">🗄</button>
+                  <button class="tool" data-tool="dbIndex" title="Индекс" type="button">⌕</button>
+                  <button class="tool" data-tool="dbProcedure" title="Процедура / функция" type="button">ƒ</button>
+                  <button class="tool" data-tool="dbTrigger" title="Триггер" type="button">⚡</button>
+                </div>
+              </div>
+              <div class="tool-sep"></div>
+              <label class="color-pick" title="Цвет">
+                <input id="stroke-color" type="color" value="#1f2937" />
+              </label>
+              <button id="btn-delete" class="tool danger" title="Удалить (Del)" type="button">⌫</button>
+              <button id="btn-tool-drawer" class="tool tool-more" type="button" title="Ещё инструменты" aria-expanded="false">⋯</button>
             </div>
-            <div class="tool-group tool-group-bpmn" title="BPMN">
-              <span class="tool-group-label">bpmn</span>
-              <button class="tool" data-tool="task" title="BPMN: задача" type="button">▢</button>
-              <button class="tool" data-tool="gateway" title="BPMN: шлюз" type="button">◇</button>
-              <button class="tool" data-tool="event" title="BPMN: событие" type="button">⬭</button>
+            <div class="toolbar-drawer hidden" id="toolbar-drawer" aria-hidden="true">
+              <div class="toolbar-drawer-head">
+                <span>Все инструменты</span>
+                <button type="button" class="btn ghost small" id="btn-tool-drawer-close" title="Закрыть">✕</button>
+              </div>
+              <div class="toolbar-drawer-section">
+                <span class="tool-group-label">Линии</span>
+                <div class="toolbar-drawer-row">
+                  <button class="tool" data-tool="line" title="Линия (L)" type="button">╱</button>
+                  <button class="tool" data-tool="arrow" title="Стрелка (A)" type="button">→</button>
+                </div>
+              </div>
+              <div class="toolbar-drawer-section">
+                <span class="tool-group-label">Ссылки</span>
+                <div class="toolbar-drawer-row">
+                  <button class="tool tool-room-link" data-tool="roomLink" title="Ссылка на комнату" type="button" aria-label="Ссылка на комнату">
+                    <span class="tool-room-link-ico" aria-hidden="true">🔗</span>
+                  </button>
+                  <button class="tool tool-card-link" data-tool="cardLink" title="Ссылка на задачу канбана" type="button" aria-label="Ссылка на задачу канбана">
+                    <span class="tool-card-link-ico" aria-hidden="true">📋</span>
+                  </button>
+                </div>
+              </div>
+              <div class="toolbar-drawer-section">
+                <span class="tool-group-label">Фигуры</span>
+                <div class="toolbar-drawer-row">
+                  <button class="tool" data-tool="rect" title="Прямоугольник (R)" type="button">▭</button>
+                  <button class="tool" data-tool="square" title="Квадрат" type="button">□</button>
+                  <button class="tool" data-tool="circle" title="Круг" type="button">○</button>
+                  <button class="tool" data-tool="ellipse" title="Эллипс / овал (O)" type="button">◯</button>
+                </div>
+              </div>
+              <div class="toolbar-drawer-section">
+                <span class="tool-group-label">BPMN</span>
+                <div class="toolbar-drawer-row">
+                  <button class="tool" data-tool="task" title="BPMN: задача" type="button">▢</button>
+                  <button class="tool" data-tool="gateway" title="BPMN: шлюз" type="button">◇</button>
+                  <button class="tool" data-tool="event" title="BPMN: событие" type="button">⬭</button>
+                </div>
+              </div>
+              <div class="toolbar-drawer-section">
+                <span class="tool-group-label">База данных</span>
+                <div class="toolbar-drawer-row">
+                  <button class="tool" data-tool="dbTable" title="Таблица" type="button">▤</button>
+                  <button class="tool" data-tool="dbView" title="Представление" type="button">▥</button>
+                  <button class="tool" data-tool="dbSchema" title="Схема" type="button">⧉</button>
+                  <button class="tool" data-tool="dbDatabase" title="База данных" type="button">🗄</button>
+                  <button class="tool" data-tool="dbIndex" title="Индекс" type="button">⌕</button>
+                  <button class="tool" data-tool="dbProcedure" title="Процедура / функция" type="button">ƒ</button>
+                  <button class="tool" data-tool="dbTrigger" title="Триггер" type="button">⚡</button>
+                  <button class="tool" data-tool="dbEnum" title="Тип / Enum" type="button">⟨⟩</button>
+                </div>
+              </div>
             </div>
-            <div class="tool-group tool-group-db" title="База данных">
-              <span class="tool-group-label">БД</span>
-              <button class="tool" data-tool="dbTable" title="Таблица" type="button">▤</button>
-              <button class="tool" data-tool="dbView" title="Представление" type="button">▥</button>
-              <button class="tool" data-tool="dbSchema" title="Схема" type="button">⧉</button>
-              <button class="tool" data-tool="dbDatabase" title="База данных" type="button">🗄</button>
-              <button class="tool" data-tool="dbIndex" title="Индекс" type="button">⌕</button>
-              <button class="tool" data-tool="dbProcedure" title="Процедура / функция" type="button">ƒ</button>
-              <button class="tool" data-tool="dbTrigger" title="Триггер" type="button">⚡</button>
-              <button class="tool" data-tool="dbEnum" title="Тип / Enum" type="button">⟨⟩</button>
-            </div>
-            <div class="tool-sep"></div>
-            <button class="tool" data-tool="connector" title="Соединитель (C)" type="button">⟷</button>
-            <button class="tool" data-tool="line" title="Линия (L)" type="button">╱</button>
-            <button class="tool" data-tool="arrow" title="Стрелка (A)" type="button">→</button>
-            <button class="tool" data-tool="sticky" title="Стикер (S)" type="button">🗒</button>
-            <button class="tool" data-tool="text" title="Текст (T)" type="button">T</button>
-            <button class="tool tool-room-link" data-tool="roomLink" title="Ссылка на комнату" type="button" aria-label="Ссылка на комнату">
-              <span class="tool-room-link-ico" aria-hidden="true">🔗</span>
-            </button>
-            <button class="tool tool-card-link" data-tool="cardLink" title="Ссылка на задачу канбана" type="button" aria-label="Ссылка на задачу канбана">
-              <span class="tool-card-link-ico" aria-hidden="true">📋</span>
-            </button>
-            <div class="tool-sep"></div>
-            <label class="color-pick" title="Цвет">
-              <input id="stroke-color" type="color" value="#1f2937" />
-            </label>
-            <button id="btn-delete" class="tool danger" title="Удалить (Del)" type="button">⌫</button>
           </aside>
           <div class="canvas-wrap" id="canvas-wrap">
             <canvas id="board"></canvas>
@@ -359,7 +423,7 @@
       <!-- Chat / DM sidebar -->
       <aside class="chat-panel" id="chat-panel">
         <div class="chat-header">
-          <div class="public-rooms-side-wrap">
+          <div class="public-rooms-side-wrap hidden" id="public-rooms-side-wrap" hidden>
             <div class="public-rooms-title">Открытые комнаты</div>
             <div id="public-rooms-side" class="public-rooms-list compact"></div>
           </div>
@@ -405,11 +469,38 @@
         <span>Код комнаты</span>
         <input id="open-room-input" type="text" maxlength="32" placeholder="код или пусто — создать новую" />
       </label>
+      <div class="public-rooms-block modal-public-rooms" id="modal-public-rooms">
+        <h3 class="public-rooms-title">Открытые комнаты</h3>
+        <div id="public-rooms-modal" class="public-rooms-list"></div>
+      </div>
       <div class="modal-actions">
         <div class="spacer"></div>
         <button id="open-room-cancel" class="btn" type="button">Отмена</button>
         <button id="open-room-ok" class="btn primary" type="button">Открыть</button>
       </div>
+    </div>
+  </div>
+
+  <!-- DB columns editor -->
+  <div id="db-columns-panel" class="db-columns-panel hidden">
+    <div class="db-columns-panel-head">
+      <strong id="db-columns-title">Колонки таблицы</strong>
+      <button type="button" class="btn ghost small" id="db-columns-close" title="Закрыть">✕</button>
+    </div>
+    <label class="field">
+      <span>Имя</span>
+      <input id="db-columns-name" type="text" maxlength="80" autocomplete="off" />
+    </label>
+    <div class="db-columns-table-wrap">
+      <table class="db-columns-table" id="db-columns-table">
+        <thead><tr><th>Колонка</th><th>Тип</th><th></th></tr></thead>
+        <tbody id="db-columns-body"></tbody>
+      </table>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn ghost small" id="db-columns-add">+ Строка</button>
+      <div class="spacer"></div>
+      <button type="button" class="btn primary small" id="db-columns-save">Готово</button>
     </div>
   </div>
 
@@ -458,6 +549,6 @@
       </div>
     </div>
 
-  <script src="/js/app.js?v=20260923d"></script>
+  <script src="/js/app.js?v=20260923g"></script>
 </body>
 </html>
