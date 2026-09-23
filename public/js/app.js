@@ -1365,20 +1365,24 @@
 
   window.addEventListener('keydown', (e) => {
     if (isTypingTarget(e.target)) {
+      const dbPanel = $('#db-columns-panel');
+      const inDbPanel = !!(dbPanel && !dbPanel.classList.contains('hidden') && (
+        dbPanel.contains(e.target) || dbPanel.contains(document.activeElement)
+      ));
+      if (e.key === 'Escape' && inDbPanel) {
+        e.preventDefault();
+        closeDbColumnsPanel();
+        setTool('select');
+        return;
+      }
       if (e.key === 'Escape' && state.inlineEdit) {
         e.preventDefault();
         cancelInlineEdit(true);
         setTool('select');
         return;
       }
-      // Db columns panel is a typing target — Esc closes + select
-      const dbPanel = $('#db-columns-panel');
-      if (e.key === 'Escape' && dbPanel && !dbPanel.classList.contains('hidden')) {
-        e.preventDefault();
-        closeDbColumnsPanel();
-        setTool('select');
-        return;
-      }
+      // Never steal keys from the DB columns panel into canvas inline edit
+      if (inDbPanel) return;
       // If focus left the editor, put it back and apply the key so typing still works
       if (state.inlineEdit && document.activeElement !== inlineEditEl) {
         inlineEditEl.focus({ preventScroll: true });
@@ -1802,7 +1806,7 @@
   // ---------- Geometry helpers ----------
   const SHAPE_TYPES = new Set([
     'rect', 'square', 'circle', 'ellipse', 'task', 'gateway', 'event', 'sticky', 'roomLink', 'cardLink', 'image',
-    'dbTable', 'dbView', 'dbSchema', 'dbDatabase', 'dbIndex', 'dbProcedure', 'dbTrigger', 'dbEnum',, 'text']);
+    'dbTable', 'dbView', 'dbSchema', 'dbDatabase', 'dbIndex', 'dbProcedure', 'dbTrigger', 'dbEnum', 'text']);
 
   function objectRotationRad(obj) {
     const deg = (obj && obj.rotation) || 0;
@@ -1980,9 +1984,41 @@
 
 
   let dbColumnsEditId = null;
+
+  function syncDbColumnsFromDom(obj) {
+    if (!obj) return;
+    const nameInput = $('#db-columns-name');
+    if (nameInput) obj.label = nameInput.value.trim();
+    const body = $('#db-columns-body');
+    if (!body) return;
+    const rows = [...body.querySelectorAll('tr')];
+    const next = [];
+    rows.forEach((tr) => {
+      const nameEl = tr.querySelector('input[data-f="name"]');
+      const typeEl = tr.querySelector('input[data-f="type"]');
+      if (!nameEl && !typeEl) return;
+      const prev = obj.columns && obj.columns[next.length] ? obj.columns[next.length] : {};
+      next.push({
+        name: (nameEl && nameEl.value) || '',
+        type: (typeEl && typeEl.value) || 'text',
+        pk: !!prev.pk,
+        unique: !!prev.unique,
+        nullable: prev.nullable !== false,
+      });
+    });
+    obj.columns = next;
+    ensureDbColumns(obj);
+  }
+
   function openDbColumnsPanel(obj) {
     if (!obj || !DB_COLUMN_TYPES.includes(obj.type)) return;
+    cancelInlineEdit(true);
+    pendingInlineEditId = null;
     ensureDbColumns(obj);
+    if (!Array.isArray(obj.columns) || obj.columns.length === 0) {
+      obj.columns = [{ name: '', type: 'text', pk: false, unique: false, nullable: true }];
+      ensureDbColumns(obj);
+    }
     dbColumnsEditId = obj.id;
     const panel = $('#db-columns-panel');
     if (!panel) return;
@@ -1993,6 +2029,21 @@
     if (nameInput) nameInput.value = obj.label || obj.name || '';
     const body = $('#db-columns-body');
     if (!body) return;
+
+    const applyField = (inp) => {
+      const o2 = state.objects.find((x) => x.id === dbColumnsEditId);
+      if (!o2) return;
+      ensureDbColumns(o2);
+      const i = Number(inp.dataset.i);
+      if (!o2.columns[i]) return;
+      o2.columns[i][inp.dataset.f] = inp.value;
+      if (nameInput) o2.label = nameInput.value.trim();
+      ensureDbColumns(o2);
+      fitDbHeight(o2);
+      emit('object-update', o2);
+      draw();
+    };
+
     const redraw = () => {
       const o = state.objects.find((x) => x.id === dbColumnsEditId);
       if (!o) return;
@@ -2000,28 +2051,45 @@
       body.innerHTML = '';
       o.columns.forEach((col, idx) => {
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td><input data-f="name" data-i="${idx}" value="${escapeHtml(col.name || '')}"/></td>
-          <td><input data-f="type" data-i="${idx}" value="${escapeHtml(col.type || '')}"/></td>
-          <td><button type="button" data-del="${idx}">✕</button></td>`;
+        const nameTd = document.createElement('td');
+        const typeTd = document.createElement('td');
+        const delTd = document.createElement('td');
+        const nameInp = document.createElement('input');
+        nameInp.type = 'text';
+        nameInp.dataset.f = 'name';
+        nameInp.dataset.i = String(idx);
+        nameInp.value = col.name || '';
+        nameInp.placeholder = 'колонка';
+        nameInp.autocomplete = 'off';
+        const typeInp = document.createElement('input');
+        typeInp.type = 'text';
+        typeInp.dataset.f = 'type';
+        typeInp.dataset.i = String(idx);
+        typeInp.value = col.type || '';
+        typeInp.placeholder = 'тип';
+        typeInp.autocomplete = 'off';
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'db-col-del';
+        delBtn.dataset.del = String(idx);
+        delBtn.title = 'Удалить строку';
+        delBtn.textContent = '✕';
+        nameTd.appendChild(nameInp);
+        typeTd.appendChild(typeInp);
+        delTd.appendChild(delBtn);
+        tr.appendChild(nameTd);
+        tr.appendChild(typeTd);
+        tr.appendChild(delTd);
         body.appendChild(tr);
       });
       body.querySelectorAll('input').forEach((inp) => {
-        inp.addEventListener('change', () => {
-          const o2 = state.objects.find((x) => x.id === dbColumnsEditId);
-          if (!o2) return;
-          pushHistory();
-          ensureDbColumns(o2);
-          const i = Number(inp.dataset.i);
-          o2.columns[i][inp.dataset.f] = inp.value;
-          ensureDbColumns(o2);
-          fitDbHeight(o2);
-          emit('object-update', o2);
-          draw();
-        });
+        inp.addEventListener('input', () => applyField(inp));
+        inp.addEventListener('change', () => applyField(inp));
         inp.addEventListener('keydown', (e) => {
           if (e.key !== 'Enter') return;
           e.preventDefault();
-          inp.dispatchEvent(new Event('change'));
+          e.stopPropagation();
+          applyField(inp);
           const i = Number(inp.dataset.i);
           const f = inp.dataset.f;
           const o2 = state.objects.find((x) => x.id === dbColumnsEditId);
@@ -2031,8 +2099,9 @@
             else if (i > 0) body.querySelector(`input[data-f="type"][data-i="${i - 1}"]`)?.focus();
             return;
           }
-          if (f === 'name') body.querySelector(`input[data-f="type"][data-i="${i}"]`)?.focus();
-          else {
+          if (f === 'name') {
+            body.querySelector(`input[data-f="type"][data-i="${i}"]`)?.focus();
+          } else {
             ensureDbColumns(o2);
             if (i >= o2.columns.length - 1) {
               pushHistory();
@@ -2042,7 +2111,9 @@
               redraw();
               draw();
             }
-            body.querySelector(`input[data-f="name"][data-i="${i + 1}"]`)?.focus();
+            requestAnimationFrame(() => {
+              body.querySelector(`input[data-f="name"][data-i="${i + 1}"]`)?.focus();
+            });
           }
         });
       });
@@ -2051,8 +2122,12 @@
           const o2 = state.objects.find((x) => x.id === dbColumnsEditId);
           if (!o2) return;
           pushHistory();
+          syncDbColumnsFromDom(o2);
           ensureDbColumns(o2);
           o2.columns.splice(Number(btn.getAttribute('data-del')), 1);
+          if (!o2.columns.length) {
+            o2.columns.push({ name: '', type: 'text', pk: false, unique: false, nullable: true });
+          }
           fitDbHeight(o2);
           emit('object-update', o2);
           redraw();
@@ -2061,35 +2136,75 @@
       });
     };
     redraw();
+    requestAnimationFrame(() => {
+      const inputs = [...body.querySelectorAll('input[data-f="name"]')];
+      const firstEmpty = inputs.find((el) => !el.value.trim()) || inputs[0];
+      if (firstEmpty) firstEmpty.focus();
+      else if (nameInput) nameInput.focus();
+    });
   }
-  $('#db-columns-close')?.addEventListener('click', () => { closeDbColumnsPanel(); setTool('select'); });
+
+  $('#db-columns-close')?.addEventListener('click', () => {
+    const o = state.objects.find((x) => x.id === dbColumnsEditId);
+    if (o) {
+      pushHistory();
+      syncDbColumnsFromDom(o);
+      fitDbHeight(o);
+      emit('object-update', o);
+      draw();
+    }
+    closeDbColumnsPanel();
+    setTool('select');
+  });
   $('#db-columns-add')?.addEventListener('click', () => {
     const o = state.objects.find((x) => x.id === dbColumnsEditId);
     if (!o) return;
     pushHistory();
+    syncDbColumnsFromDom(o);
     ensureDbColumns(o);
     o.columns.push({ name: '', type: 'text', pk: false, unique: false, nullable: true });
     fitDbHeight(o);
     emit('object-update', o);
     openDbColumnsPanel(o);
     draw();
+    requestAnimationFrame(() => {
+      const body = $('#db-columns-body');
+      const last = body && body.querySelector(`input[data-f="name"][data-i="${o.columns.length - 1}"]`);
+      if (last) last.focus();
+    });
   });
   $('#db-columns-save')?.addEventListener('click', () => {
     const o = state.objects.find((x) => x.id === dbColumnsEditId);
     if (o) {
-      const nameInput = $('#db-columns-name');
-      if (nameInput) {
-        pushHistory();
-        o.label = nameInput.value.trim();
-        ensureDbColumns(o);
-        fitDbHeight(o);
-        emit('object-update', o);
-        draw();
-      }
+      pushHistory();
+      syncDbColumnsFromDom(o);
+      fitDbHeight(o);
+      emit('object-update', o);
+      draw();
     }
     closeDbColumnsPanel();
     setTool('select');
   });
+
+  if (true) {
+    const nameInput = $('#db-columns-name');
+    if (nameInput) {
+      nameInput.addEventListener('input', () => {
+        const o = state.objects.find((x) => x.id === dbColumnsEditId);
+        if (!o) return;
+        o.label = nameInput.value.trim();
+        emit('object-update', o);
+        draw();
+      });
+      nameInput.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        const body = $('#db-columns-body');
+        const first = body && body.querySelector('input[data-f="name"]');
+        if (first) first.focus();
+      });
+    }
+  }
 
   function ensureDbColumns(obj) {
     if (!obj || !DB_TYPES.has(obj.type)) return obj;
@@ -3690,8 +3805,9 @@
           if (e.altKey) openCardLinkPanel(hit);
           else navigateCardLink(hit);
         } else if (DB_TYPES.has(hit.type)) {
-          if (e.shiftKey) queueInlineEditAttrs(hit);
-          else queueInlineEdit(hit); // name on header
+          // Tables/views/enums: full columns editor (name + columns + types)
+          if (DB_COLUMN_TYPES.includes(hit.type) || e.shiftKey) queueInlineEditAttrs(hit);
+          else queueInlineEdit(hit);
         } else {
           queueInlineEdit(hit);
         }
@@ -4093,7 +4209,8 @@
       setTool('select');
       draw();
       if (obj.type === 'cardLink') openCardLinkPanel(obj);
-      if (DB_TYPES.has(obj.type)) queueInlineEdit(obj);
+      if (DB_COLUMN_TYPES.includes(obj.type)) openDbColumnsPanel(obj);
+      else if (DB_TYPES.has(obj.type)) queueInlineEdit(obj);
     }
   });
 
