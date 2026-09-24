@@ -3627,7 +3627,8 @@
   }
 
   function updateArrowStyleMenu() {
-    const menu = arrowStyleMenuEl;
+    // Look up lazily: draw() can run before the const below is initialized.
+    const menu = document.getElementById('arrow-style-menu');
     if (!menu) return;
     const hide =
       !!state.inlineEdit ||
