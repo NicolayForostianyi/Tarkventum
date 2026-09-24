@@ -33,6 +33,8 @@ const DMS_FILE = path.join(DATA_DIR, 'dms.json');
 const PERSONAL_KANBAN_FILE = path.join(DATA_DIR, 'personal-kanban.json');
 const AVATARS_DIR = path.join(DATA_DIR, 'avatars');
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
+const ROOMS_DIR = path.join(DATA_DIR, 'rooms');
+const ROOM_SAVE_DEBOUNCE_MS = 400;
 const MAX_AVATAR_BYTES = 800 * 1024;
 const MAX_CANVAS_IMAGE_BYTES = 3 * 1024 * 1024;
 
@@ -85,6 +87,7 @@ function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   if (!fs.existsSync(AVATARS_DIR)) fs.mkdirSync(AVATARS_DIR, { recursive: true });
   if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+  if (!fs.existsSync(ROOMS_DIR)) fs.mkdirSync(ROOMS_DIR, { recursive: true });
 }
 
 function loadJson(file, fallback) {
@@ -603,10 +606,156 @@ function createRoom(id, { ownerId = null, visibility = 'public', title = '' } = 
   };
 }
 
-function getOrCreateRoom(roomId, opts) {
-  if (!rooms.has(roomId)) rooms.set(roomId, createRoom(roomId, opts || {}));
-  return rooms.get(roomId);
+const roomSaveTimers = new Map();
+
+function roomFilePath(roomId) {
+  const id = normalizeRoomId(roomId);
+  if (!id) return null;
+  return path.join(ROOMS_DIR, `${id}.json`);
 }
+
+function serializeRoom(room) {
+  if (!room) return null;
+  if (Array.isArray(room.messages) && room.messages.length > MAX_CHAT) {
+    room.messages = room.messages.slice(-MAX_CHAT);
+  }
+  return {
+    id: room.id,
+    title: room.title || '',
+    ownerId: room.ownerId || null,
+    visibility: room.visibility === 'private' ? 'private' : 'public',
+    members: Array.isArray(room.members) ? room.members : [],
+    objects: Array.isArray(room.objects) ? room.objects : [],
+    connectors: Array.isArray(room.connectors) ? room.connectors : [],
+    columns: Array.isArray(room.columns) && room.columns.length
+      ? room.columns
+      : DEFAULT_COLUMNS.map((c) => ({ ...c })),
+    cards: Array.isArray(room.cards) ? room.cards : [],
+    messages: Array.isArray(room.messages) ? room.messages.slice(-MAX_CHAT) : [],
+    updatedAt: Date.now(),
+  };
+}
+
+function hydrateRoom(data) {
+  if (!data || typeof data !== 'object') return null;
+  const id = normalizeRoomId(data.id);
+  if (!id) return null;
+  const room = createRoom(id, {
+    ownerId: data.ownerId || null,
+    visibility: data.visibility || 'public',
+    title: data.title || '',
+  });
+  room.members = Array.isArray(data.members) ? data.members : [];
+  room.objects = Array.isArray(data.objects) ? data.objects : [];
+  room.connectors = Array.isArray(data.connectors) ? data.connectors : [];
+  room.columns = Array.isArray(data.columns) && data.columns.length
+    ? data.columns
+    : DEFAULT_COLUMNS.map((c) => ({ ...c }));
+  room.cards = Array.isArray(data.cards) ? data.cards : [];
+  room.messages = Array.isArray(data.messages) ? data.messages.slice(-MAX_CHAT) : [];
+  room.users = new Map(); // presence is ephemeral
+  return room;
+}
+
+function loadRoomFromDisk(roomId) {
+  const file = roomFilePath(roomId);
+  if (!file || !fs.existsSync(file)) return null;
+  const data = loadJson(file, null);
+  if (!data) return null;
+  return hydrateRoom(data);
+}
+
+function saveRoomToDisk(room) {
+  if (!room || !room.id) return;
+  const file = roomFilePath(room.id);
+  if (!file) return;
+  try {
+    saveJson(file, serializeRoom(room));
+  } catch (err) {
+    console.error('saveRoomToDisk', room.id, err.message);
+  }
+}
+
+function deleteRoomFromDisk(roomId) {
+  const file = roomFilePath(roomId);
+  if (!file) return;
+  try {
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+  } catch (err) {
+    console.error('deleteRoomFromDisk', roomId, err.message);
+  }
+}
+
+function scheduleRoomSave(roomOrId, { immediate = false } = {}) {
+  const id = normalizeRoomId(
+    typeof roomOrId === 'string' ? roomOrId : (roomOrId && roomOrId.id)
+  );
+  if (!id) return;
+  const prev = roomSaveTimers.get(id);
+  if (prev) {
+    clearTimeout(prev);
+    roomSaveTimers.delete(id);
+  }
+  const flush = () => {
+    roomSaveTimers.delete(id);
+    const room = rooms.get(id);
+    if (room) saveRoomToDisk(room);
+  };
+  if (immediate) {
+    flush();
+    return;
+  }
+  roomSaveTimers.set(id, setTimeout(flush, ROOM_SAVE_DEBOUNCE_MS));
+}
+
+function flushAllRoomSaves() {
+  for (const [id, timer] of [...roomSaveTimers.entries()]) {
+    clearTimeout(timer);
+    roomSaveTimers.delete(id);
+    const room = rooms.get(id);
+    if (room) saveRoomToDisk(room);
+  }
+}
+
+function loadAllRoomsFromDisk() {
+  ensureDataDir();
+  let count = 0;
+  try {
+    for (const name of fs.readdirSync(ROOMS_DIR)) {
+      if (!name.endsWith('.json')) continue;
+      const id = normalizeRoomId(name.slice(0, -5));
+      if (!id || rooms.has(id)) continue;
+      const room = loadRoomFromDisk(id);
+      if (room) {
+        rooms.set(id, room);
+        count += 1;
+      }
+    }
+  } catch (err) {
+    console.error('loadAllRoomsFromDisk', err.message);
+  }
+  console.log(`Loaded ${count} persisted room(s) from ${ROOMS_DIR}`);
+}
+
+function getOrCreateRoom(roomId, opts) {
+  const id = normalizeRoomId(roomId);
+  if (!id) {
+    // keep previous behaviour for callers that already normalized
+    if (!rooms.has(roomId)) rooms.set(roomId, createRoom(roomId, opts || {}));
+    return rooms.get(roomId);
+  }
+  if (rooms.has(id)) return rooms.get(id);
+  const loaded = loadRoomFromDisk(id);
+  if (loaded) {
+    rooms.set(id, loaded);
+    return loaded;
+  }
+  const room = createRoom(id, opts || {});
+  rooms.set(id, room);
+  scheduleRoomSave(room, { immediate: true });
+  return room;
+}
+
 
 function canAccessRoom(room, accountId) {
   if (!room) return false;
@@ -748,10 +897,8 @@ io.on('connection', (socket) => {
     if (room) {
       room.users.delete(userId);
       socket.to(rid).emit('user-left', { id: userId });
-      setTimeout(() => {
-        const r = rooms.get(rid);
-        if (r && r.users.size === 0) rooms.delete(rid);
-      }, 5 * 60 * 1000);
+      // Keep durable room data (memory + disk). Only presence is ephemeral.
+      if (room.users.size === 0) scheduleRoomSave(rid, { immediate: true });
     }
     socket.leave(rid);
     currentRoom = null;
@@ -780,8 +927,10 @@ io.on('connection', (socket) => {
       }
       const room = getOrCreateRoom(id, { ownerId: account.id, visibility: 'public' });
       // First joiner becomes owner if missing
-      if (!room.ownerId) room.ownerId = account.id;
-      if (!room.visibility) room.visibility = 'public';
+      let metaChanged = false;
+      if (!room.ownerId) { room.ownerId = account.id; metaChanged = true; }
+      if (!room.visibility) { room.visibility = 'public'; metaChanged = true; }
+      if (metaChanged) scheduleRoomSave(room);
 
       if (!canAccessRoom(room, account.id)) {
         if (typeof ack === 'function') ack({ ok: false, error: 'Приватная комната: доступ только у владельца' });
@@ -865,6 +1014,7 @@ io.on('connection', (socket) => {
         }
       }
       rooms.delete(id);
+      deleteRoomFromDisk(id);
       if (currentRoom === id) {
         currentRoom = null;
         userId = null;
@@ -906,6 +1056,7 @@ io.on('connection', (socket) => {
       const r = role === 'editor' || role === 'admin' ? role : 'member';
       if (existing) existing.role = r;
       else room.members.push({ userId: other.id, role: r });
+      scheduleRoomSave(id);
       io.to(id).emit('room-members', { roomId: id, members: membersPublic(room) });
       emitToAccount(other.id, 'room-invite-notice', {
         roomId: id,
@@ -943,6 +1094,7 @@ io.on('connection', (socket) => {
         return;
       }
       m.role = role === 'editor' || role === 'admin' ? role : 'member';
+      scheduleRoomSave(id);
       io.to(id).emit('room-members', { roomId: id, members: membersPublic(room) });
       if (typeof ack === 'function') ack({ ok: true, members: membersPublic(room) });
     } catch (err) {
@@ -968,6 +1120,7 @@ io.on('connection', (socket) => {
         return;
       }
       room.members = (room.members || []).filter((m) => m.userId !== userId);
+      scheduleRoomSave(id);
       io.to(id).emit('room-members', { roomId: id, members: membersPublic(room) });
       // kick if online in room
       for (const [sid, u] of room.users.entries()) {
@@ -1036,6 +1189,7 @@ io.on('connection', (socket) => {
     const room = rooms.get(currentRoom);
     if (!room) return;
     room.objects.push(obj);
+    scheduleRoomSave(currentRoom);
     socket.to(currentRoom).emit('object-add', obj);
   });
 
@@ -1046,6 +1200,7 @@ io.on('connection', (socket) => {
     const idx = room.objects.findIndex((o) => o.id === obj.id);
     if (idx >= 0) {
       room.objects[idx] = { ...room.objects[idx], ...obj };
+      scheduleRoomSave(currentRoom);
       socket.to(currentRoom).emit('object-update', room.objects[idx]);
     }
   });
@@ -1062,6 +1217,7 @@ io.on('connection', (socket) => {
     room.connectors = room.connectors.filter(
       (c) => !set.has(c.fromId) && !set.has(c.toId) && !set.has(c.id)
     );
+    scheduleRoomSave(currentRoom);
     socket.to(currentRoom).emit('object-delete', { ids });
     if (removedConnectors.length) {
       const connIds = removedConnectors.map((c) => c.id);
@@ -1083,8 +1239,11 @@ io.on('connection', (socket) => {
       stroke: conn.stroke || '#64748b',
       strokeWidth: conn.strokeWidth || 2,
       arrow: conn.arrow !== false,
+      heads: conn.heads || (conn.arrow === false ? 'none' : 'end'),
+      dash: conn.dash || 'solid',
     };
     room.connectors.push(item);
+    scheduleRoomSave(currentRoom);
     io.to(currentRoom).emit('connector-add', item);
   });
 
@@ -1095,6 +1254,7 @@ io.on('connection', (socket) => {
     const idx = room.connectors.findIndex((c) => c.id === conn.id);
     if (idx < 0) return;
     room.connectors[idx] = { ...room.connectors[idx], ...conn };
+    scheduleRoomSave(currentRoom);
     socket.to(currentRoom).emit('connector-update', room.connectors[idx]);
   });
 
@@ -1104,6 +1264,7 @@ io.on('connection', (socket) => {
     if (!room) return;
     const set = new Set(ids);
     room.connectors = room.connectors.filter((c) => !set.has(c.id));
+    scheduleRoomSave(currentRoom);
     socket.to(currentRoom).emit('connector-delete', { ids });
   });
 
@@ -1113,6 +1274,7 @@ io.on('connection', (socket) => {
     if (!room) return;
     const newCard = normalizeCard(card, room, card.columnId);
     room.cards.push(newCard);
+    scheduleRoomSave(currentRoom);
     io.to(currentRoom).emit('card-add', newCard);
     if (typeof ack === 'function') ack({ ok: true, card: newCard });
   });
@@ -1137,6 +1299,7 @@ io.on('connection', (socket) => {
       columnId: card.columnId !== undefined ? card.columnId : prev.columnId,
       order: card.order !== undefined ? card.order : prev.order,
     };
+    scheduleRoomSave(currentRoom);
     io.to(currentRoom).emit('card-update', room.cards[idx]);
   });
 
@@ -1145,6 +1308,7 @@ io.on('connection', (socket) => {
     const room = rooms.get(currentRoom);
     if (!room) return;
     room.cards = room.cards.filter((c) => c.id !== id);
+    scheduleRoomSave(currentRoom);
     io.to(currentRoom).emit('card-delete', { id });
   });
 
@@ -1160,6 +1324,7 @@ io.on('connection', (socket) => {
         if (patch.order !== undefined) c.order = patch.order;
       }
     }
+    scheduleRoomSave(currentRoom);
     io.to(currentRoom).emit('cards-reorder', { cards: room.cards });
   });
 
@@ -1176,6 +1341,7 @@ io.on('connection', (socket) => {
       order: typeof payload?.order === 'number' ? payload.order : order,
     };
     room.columns.push(col);
+    scheduleRoomSave(currentRoom);
     io.to(currentRoom).emit('column-add', col);
     if (typeof ack === 'function') ack({ ok: true, column: col });
   });
@@ -1187,6 +1353,7 @@ io.on('connection', (socket) => {
     const col = room.columns.find((c) => c.id === id);
     if (!col) return;
     col.title = String(title || col.title).slice(0, 64);
+    scheduleRoomSave(currentRoom);
     io.to(currentRoom).emit('column-rename', { id, title: col.title });
   });
 
@@ -1200,6 +1367,7 @@ io.on('connection', (socket) => {
     for (const card of room.cards) {
       if (card.columnId === id) card.columnId = fallback;
     }
+    scheduleRoomSave(currentRoom);
     io.to(currentRoom).emit('column-delete', { id, fallbackColumnId: fallback, cards: room.cards });
   });
 
@@ -1228,6 +1396,7 @@ io.on('connection', (socket) => {
     if (room.messages.length > MAX_CHAT) {
       room.messages = room.messages.slice(-MAX_CHAT);
     }
+    scheduleRoomSave(currentRoom);
     io.to(currentRoom).emit('chat-message', message);
     if (typeof ack === 'function') ack({ ok: true, message });
   });
@@ -1458,6 +1627,17 @@ io.on('connection', (socket) => {
     broadcastPresence();
   });
 });
+
+ensureDataDir();
+loadAllRoomsFromDisk();
+
+function shutdown(signal) {
+  console.log(`Shutting down (${signal})… flushing rooms`);
+  try { flushAllRoomSaves(); } catch (err) { console.error(err); }
+  process.exit(0);
+}
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 server.listen(PORT, () => {
   console.log(`Tarkventum listening on http://localhost:${PORT}`);
