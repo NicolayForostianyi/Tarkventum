@@ -1947,13 +1947,64 @@
   function drawArrowHead(x1, y1, x2, y2, stroke) {
     const ang = Math.atan2(y2 - y1, x2 - x1);
     const len = 12;
+    ctx.save();
+    ctx.setLineDash([]); // heads always solid, even on dashed lines
     ctx.strokeStyle = stroke;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
     ctx.beginPath();
     ctx.moveTo(x2, y2);
     ctx.lineTo(x2 - len * Math.cos(ang - 0.4), y2 - len * Math.sin(ang - 0.4));
     ctx.moveTo(x2, y2);
     ctx.lineTo(x2 - len * Math.cos(ang + 0.4), y2 - len * Math.sin(ang + 0.4));
     ctx.stroke();
+    ctx.restore();
+  }
+
+  /** Resolve arrow/line/connector head mode with backward-compatible defaults. */
+  function resolveArrowHeads(obj) {
+    if (!obj) return 'none';
+    const h = obj.heads;
+    if (h === 'none' || h === 'end' || h === 'start' || h === 'both') return h;
+    if (obj.type === 'arrow') return 'end';
+    if (obj.type === 'line') return 'none';
+    // connectors: legacy `arrow` boolean
+    if (obj.arrow === false) return 'none';
+    return 'end';
+  }
+
+  function resolveLineDash(obj) {
+    const d = obj && obj.dash;
+    if (d === 'dashed' || d === 'dotted' || d === 'solid') return d;
+    return 'solid';
+  }
+
+  function lineDashPattern(dash, strokeWidth) {
+    const w = Math.max(1, Number(strokeWidth) || 2);
+    if (dash === 'dashed') return [w * 4, w * 3];
+    if (dash === 'dotted') return [Math.max(1, w * 0.8), w * 2.2];
+    return [];
+  }
+
+  function drawSegmentWithHeads(x1, y1, x2, y2, { stroke, strokeWidth, heads, dash } = {}) {
+    const lw = strokeWidth || 2;
+    const color = stroke || '#1f2937';
+    const h = heads || 'none';
+    const d = dash || 'solid';
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lw;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.setLineDash(lineDashPattern(d, lw));
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    if (h === 'end' || h === 'both') drawArrowHead(x1, y1, x2, y2, color);
+    if (h === 'start' || h === 'both') drawArrowHead(x2, y2, x1, y1, color);
+    ctx.restore();
   }
 
   const imageCache = new Map(); // src -> HTMLImageElement
@@ -2471,11 +2522,12 @@
         ctx.textBaseline = 'alphabetic';
       }
     } else if (obj.type === 'line' || obj.type === 'arrow') {
-      ctx.beginPath();
-      ctx.moveTo(obj.x1, obj.y1);
-      ctx.lineTo(obj.x2, obj.y2);
-      ctx.stroke();
-      if (obj.type === 'arrow') drawArrowHead(obj.x1, obj.y1, obj.x2, obj.y2, obj.stroke || '#1f2937');
+      drawSegmentWithHeads(obj.x1, obj.y1, obj.x2, obj.y2, {
+        stroke: obj.stroke || '#1f2937',
+        strokeWidth: obj.strokeWidth || 2,
+        heads: resolveArrowHeads(obj),
+        dash: resolveLineDash(obj),
+      });
       const arrowLabel = (obj.label || '').trim();
       const editingThis = state.inlineEdit && state.inlineEdit.id === obj.id;
       if (arrowLabel && !editingThis) {
@@ -2684,18 +2736,18 @@
     const ep = connectorEndpoints(conn);
     if (!ep) return;
     ctx.save();
-    ctx.lineWidth = (conn.strokeWidth || 2) * (selected || hovered ? 1.3 : 1);
-    ctx.strokeStyle = conn.stroke || '#64748b';
     if (hovered && !selected) ctx.globalAlpha = 0.85;
+    let stroke = conn.stroke || '#64748b';
     if (selected) {
-      ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--selection').trim() || '#3b82f6';
+      stroke = getComputedStyle(document.documentElement).getPropertyValue('--selection').trim() || '#3b82f6';
     }
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(ep.x1, ep.y1);
-    ctx.lineTo(ep.x2, ep.y2);
-    ctx.stroke();
-    if (conn.arrow !== false) drawArrowHead(ep.x1, ep.y1, ep.x2, ep.y2, ctx.strokeStyle);
+    const lw = (conn.strokeWidth || 2) * (selected || hovered ? 1.3 : 1);
+    drawSegmentWithHeads(ep.x1, ep.y1, ep.x2, ep.y2, {
+      stroke,
+      strokeWidth: lw,
+      heads: resolveArrowHeads(conn),
+      dash: resolveLineDash(conn),
+    });
     ctx.restore();
   }
 
@@ -3063,6 +3115,7 @@
     ctx.restore();
     updateZoomLabel();
     renderCursors();
+    updateArrowStyleMenu();
   }
 
   function getLocalPoint(e) {
@@ -3557,6 +3610,107 @@
     if (!silent) draw();
   }
 
+
+  // ---------- Arrow / line style floating menu ----------
+  const arrowStyleMenuEl = $('#arrow-style-menu');
+
+  function getSelectedArrowLike() {
+    if (state.selectedIds.size === 1 && state.selectedConnectorIds.size === 0) {
+      const o = state.objects.find((x) => x.id === [...state.selectedIds][0]);
+      if (o && (o.type === 'arrow' || o.type === 'line')) return { kind: 'object', item: o };
+    }
+    if (state.selectedConnectorIds.size === 1 && state.selectedIds.size === 0) {
+      const c = state.connectors.find((x) => x.id === [...state.selectedConnectorIds][0]);
+      if (c) return { kind: 'connector', item: c };
+    }
+    return null;
+  }
+
+  function updateArrowStyleMenu() {
+    const menu = arrowStyleMenuEl;
+    if (!menu) return;
+    const hide =
+      !!state.inlineEdit ||
+      !!state.dragging ||
+      !!state.drawing ||
+      !!state.marquee ||
+      !!state.panning ||
+      !!state.resizing ||
+      !!state.rotating;
+    const target = hide ? null : getSelectedArrowLike();
+    if (!target) {
+      menu.classList.add('hidden');
+      return;
+    }
+    const item = target.item;
+    const heads = resolveArrowHeads(item);
+    const dash = resolveLineDash(item);
+    menu.querySelectorAll('[data-heads]').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.heads === heads);
+    });
+    menu.querySelectorAll('[data-dash]').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.dash === dash);
+    });
+
+    let mx;
+    let my;
+    if (target.kind === 'object') {
+      mx = (item.x1 + item.x2) / 2;
+      my = (item.y1 + item.y2) / 2;
+    } else {
+      const ep = connectorEndpoints(item);
+      if (!ep) {
+        menu.classList.add('hidden');
+        return;
+      }
+      mx = (ep.x1 + ep.x2) / 2;
+      my = (ep.y1 + ep.y2) / 2;
+    }
+    const sp = screenFromWorld(mx, my);
+    menu.classList.remove('hidden');
+    const mw = menu.offsetWidth || 220;
+    const mh = menu.offsetHeight || 40;
+    const wrap = canvasWrap.getBoundingClientRect();
+    let left = sp.x - mw / 2;
+    let top = sp.y - mh - 26;
+    left = Math.max(8, Math.min(left, wrap.width - mw - 8));
+    top = Math.max(8, Math.min(top, wrap.height - mh - 8));
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+  }
+
+  function applyArrowStylePatch(patch) {
+    const target = getSelectedArrowLike();
+    if (!target || !patch) return;
+    const item = target.item;
+    const next = { ...patch };
+    if (next.heads != null && target.kind === 'connector') {
+      next.arrow = next.heads !== 'none';
+    }
+    const changed = Object.keys(next).some((k) => item[k] !== next[k]);
+    if (!changed) return;
+    pushHistory();
+    Object.assign(item, next);
+    if (target.kind === 'object') emit('object-update', item);
+    else emit('connector-update', item);
+    draw();
+  }
+
+  if (arrowStyleMenuEl) {
+    arrowStyleMenuEl.addEventListener('pointerdown', (e) => {
+      e.stopPropagation();
+    });
+    arrowStyleMenuEl.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-heads], button[data-dash]');
+      if (!btn) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (btn.dataset.heads) applyArrowStylePatch({ heads: btn.dataset.heads });
+      else if (btn.dataset.dash) applyArrowStylePatch({ dash: btn.dataset.dash });
+    });
+  }
+
+
   inlineEditEl.addEventListener('pointerdown', (e) => {
     e.stopPropagation();
   });
@@ -3658,6 +3812,8 @@
           stroke: srcConn.stroke || '#64748b',
           strokeWidth: srcConn.strokeWidth || 2,
           arrow: srcConn.arrow !== false,
+          heads: srcConn.heads || (srcConn.arrow === false ? 'none' : 'end'),
+          dash: srcConn.dash || 'solid',
         };
         if (!state.connectors.find((c) => c.id === conn.id)) {
           state.connectors.push(conn);
@@ -3851,6 +4007,8 @@
         stroke: state.strokeColor,
         strokeWidth: 2,
         arrow: true,
+        heads: 'end',
+        dash: 'solid',
       };
       state.connectors.push(conn);
       emit('connector-add', conn);
@@ -4074,6 +4232,8 @@
         label: '',
         textColor: state.textColor,
         fontSize: state.fontSize || 14,
+        heads: state.tool === 'arrow' ? 'end' : 'none',
+        dash: 'solid',
       };
       return;
     }
