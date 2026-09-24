@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Tarkventum — доска и Канбан</title>
   <link rel="icon" href="/favicon.png" type="image/png" />
-  <link rel="stylesheet" href="/css/styles.css?v=20260923k" />
+  <link rel="stylesheet" href="/css/styles.css?v=20260924a" />
 </head>
 <body>
   <!-- Auth overlay -->
@@ -280,6 +280,34 @@
             <canvas id="board"></canvas>
             <div id="cursors" class="cursors"></div>
             <div id="inline-edit" class="inline-edit hidden" contenteditable="true" spellcheck="false"></div>
+            <div id="arrow-style-menu" class="arrow-style-menu hidden" role="toolbar" aria-label="Стиль стрелки">
+              <div class="arrow-style-group" role="group" aria-label="Наконечники">
+                <button type="button" data-heads="none" title="Без стрелок" aria-label="Без стрелок">
+                  <svg viewBox="0 0 24 12" width="22" height="12" aria-hidden="true"><path d="M2 6h20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                </button>
+                <button type="button" data-heads="end" title="Однонаправленная" aria-label="Однонаправленная">
+                  <svg viewBox="0 0 24 12" width="22" height="12" aria-hidden="true"><path d="M2 6h16M14 2l6 4-6 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+                <button type="button" data-heads="start" title="Однонаправленная ←" aria-label="Однонаправленная в начало">
+                  <svg viewBox="0 0 24 12" width="22" height="12" aria-hidden="true"><path d="M22 6H6M10 2L4 6l6 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+                <button type="button" data-heads="both" title="Двунаправленная" aria-label="Двунаправленная">
+                  <svg viewBox="0 0 24 12" width="22" height="12" aria-hidden="true"><path d="M8 6h8M10 2L4 6l6 4M14 2l6 4-6 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+              </div>
+              <div class="arrow-style-sep" aria-hidden="true"></div>
+              <div class="arrow-style-group" role="group" aria-label="Линия">
+                <button type="button" data-dash="solid" title="Сплошная" aria-label="Сплошная">
+                  <svg viewBox="0 0 24 12" width="22" height="12" aria-hidden="true"><path d="M2 6h20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                </button>
+                <button type="button" data-dash="dashed" title="Пунктир" aria-label="Пунктир">
+                  <svg viewBox="0 0 24 12" width="22" height="12" aria-hidden="true"><path d="M2 6h4M9 6h4M16 6h6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                </button>
+                <button type="button" data-dash="dotted" title="Точки" aria-label="Точки">
+                  <svg viewBox="0 0 24 12" width="22" height="12" aria-hidden="true"><path d="M3 6h1.5M8 6h1.5M13 6h1.5M18 6h1.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+                </button>
+              </div>
+            </div>
             <div id="room-link-panel" class="room-link-panel hidden">
               <div class="room-link-panel-head">
                 <strong>Ссылка на комнату</strong>
@@ -549,6 +577,6 @@
       </div>
     </div>
 
-  <script src="/js/app.js?v=20260923k"></script>
+  <script src="/js/app.js?v=20260924a"></script>
 </body>
 </html>
