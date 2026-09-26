@@ -42,6 +42,14 @@
     }
   }
 
+  /** Push a snapshot taken earlier (e.g. at drag start) once the gesture really changed something. */
+  function pushHistorySnapshot(snap) {
+    if (historyLocked || !state.roomId || !snap) return;
+    historyPast.push(snap);
+    if (historyPast.length > HISTORY_LIMIT) historyPast.shift();
+    historyFuture = [];
+  }
+
   function clearHistory() {
     historyPast = [];
     historyFuture = [];
@@ -74,6 +82,10 @@
       if (!prev) emit('connector-add', conn);
       else if (JSON.stringify(prev) !== JSON.stringify(conn)) emit('connector-update', conn);
     }
+
+    const orderChanged = nextObjs.length !== prevObjs.length
+      || nextObjs.some((o, i) => !prevObjs[i] || prevObjs[i].id !== o.id);
+    if (orderChanged) emit('objects-reorder', { ids: nextObjs.map((o) => o.id) });
 
     state.objects = nextObjs;
     state.connectors = nextConns;
@@ -212,7 +224,78 @@
     return fromSelect.length ? [...new Set(fromSelect)] : THEMES_FALLBACK.slice();
   }
 
+  // Theme colour cache for canvas rendering. `var` on purpose: applyTheme() runs
+  // before later let/const bindings exist (TDZ), and draw() may run from it.
+  var themeColorCache = null;
+
+  function parseCssColor(c) {
+    const s = String(c || '').trim().toLowerCase();
+    let m = /^#([0-9a-f]{3,8})$/.exec(s);
+    if (m) {
+      let h = m[1];
+      if (h.length === 3 || h.length === 4) h = h.split('').map((ch) => ch + ch).join('');
+      if (h.length !== 6 && h.length !== 8) return null;
+      const n = (i) => parseInt(h.slice(i, i + 2), 16);
+      return [n(0), n(2), n(4), h.length === 8 ? n(6) / 255 : 1];
+    }
+    m = /^rgba?\(([^)]+)\)$/.exec(s);
+    if (m) {
+      const p = m[1].split(/[\s,\/]+/).filter(Boolean).map(Number);
+      if (p.length < 3 || p.slice(0, 3).some((v) => !Number.isFinite(v))) return null;
+      return [p[0], p[1], p[2], Number.isFinite(p[3]) ? p[3] : 1];
+    }
+    if (s === 'white') return [255, 255, 255, 1];
+    if (s === 'black') return [0, 0, 0, 1];
+    return null;
+  }
+
+  function relLuminance(rgb) {
+    const f = (v) => {
+      const x = v / 255;
+      return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
+    };
+    return 0.2126 * f(rgb[0]) + 0.7152 * f(rgb[1]) + 0.0722 * f(rgb[2]);
+  }
+
+  function themeColors() {
+    if (!themeColorCache) {
+      const cs = getComputedStyle(document.documentElement);
+      const get = (k, d) => cs.getPropertyValue(k).trim() || d;
+      const bg = get('--canvas-bg', '#121820');
+      const bgRgb = parseCssColor(bg) || [18, 24, 32, 1];
+      const light = relLuminance(bgRgb) > 0.45;
+      themeColorCache = {
+        text: get('--text', light ? '#1a2332' : '#e8eef7'),
+        muted: get('--muted', light ? '#64748b' : '#94a3b8'),
+        primary: get('--primary', '#3b82f6'),
+        selection: get('--selection', '#3b82f6'),
+        bg,
+        bgLum: relLuminance(bgRgb),
+        light,
+      };
+    }
+    return themeColorCache;
+  }
+
+  /**
+   * Keep a user colour unless it is (nearly) invisible on the current canvas
+   * background, e.g. white text on the white theme or the default dark text on
+   * a dark theme. Then fall back to the theme text colour.
+   */
+  function readableColor(color, minRatio = 2.2) {
+    const t = themeColors();
+    if (!color) return t.text;
+    const rgb = parseCssColor(color);
+    if (!rgb || rgb[3] < 0.35) return color;
+    const l = relLuminance(rgb);
+    const hi = Math.max(l, t.bgLum);
+    const lo = Math.min(l, t.bgLum);
+    const ratio = (hi + 0.05) / (lo + 0.05);
+    return ratio < minRatio ? t.text : color;
+  }
+
   function applyTheme(name) {
+    themeColorCache = null;
     const themes = listThemes();
     let theme = String(name || 'black').trim();
     if (!themes.includes(theme)) theme = 'black';
@@ -253,6 +336,7 @@
     colorTarget: 'shape', // shape | text
     fontSize: 18,
     penStrokeWidth: 2.5,
+    shapeStrokeWidth: 2, // outline width for new shapes / lines / connectors
     pendingPens: [], // freehand drafts while pencil tool stays active
     roomOwnerId: null,
     roomVisibility: 'public',
@@ -1017,6 +1101,7 @@
   function closeDbColumnsPanel() {
     const panel = $('#db-columns-panel');
     if (panel) panel.classList.add('hidden');
+    if (typeof hideSqlSuggest === 'function') hideSqlSuggest();
     if (typeof dbColumnsEditId !== 'undefined') dbColumnsEditId = null;
   }
   function isAppAdminUser() {
@@ -1097,7 +1182,18 @@
   }
 
   function themeTextColor() {
-    return getComputedStyle(document.documentElement).getPropertyValue('--text').trim() || '#e8eef7';
+    return themeColors().text;
+  }
+
+  /** Colour actually used to paint an object's text (auto-contrasted to the theme). */
+  function displayTextColor(obj) {
+    const raw = objectTextColor(obj);
+    if (obj && obj.type === 'sticky') return raw; // painted on its own (yellow) fill
+    return readableColor(raw);
+  }
+
+  function displayStrokeColor(color) {
+    return readableColor(color || '#1f2937', 1.35);
   }
 
   function objectTextColor(obj) {
@@ -1148,6 +1244,7 @@
     if (!objs.length && conns.length) {
       state.colorTarget = 'shape';
       if (conns.length === 1 && conns[0].stroke) state.strokeColor = conns[0].stroke;
+      if (conns.length === 1) syncPenWidthUI(conns[0].strokeWidth || 2);
       syncColorUI();
       syncRotationUI();
       return;
@@ -1170,6 +1267,7 @@
       }
       syncFontSizeUI(objectFontSize(o));
       if (o.type === 'pen') syncPenWidthUI(o.strokeWidth || state.penStrokeWidth);
+      else if (hasEditableStroke(o)) syncPenWidthUI(o.strokeWidth || 2);
       syncRotationUI(o.rotation || 0);
     } else {
       syncRotationUI();
@@ -1245,6 +1343,7 @@
       const obj = state.objects.find((o) => o.id === id);
       if (!obj || !FONT_SIZE_TYPES.has(obj.type)) continue;
       obj.fontSize = next;
+      growDbHeight(obj);
       emit('object-update', obj);
       changed = true;
     }
@@ -1283,24 +1382,49 @@
     if (!Number.isFinite(v)) return state.penStrokeWidth || 2.5;
     return Math.max(1, Math.min(32, Math.round(v * 2) / 2));
   }
+  // Types whose outline/line thickness is user-editable (obj.strokeWidth).
+  function hasEditableStroke(obj) {
+    return !!obj && obj.type !== 'sticky' && obj.type !== 'text' && obj.type !== 'image';
+  }
+  function defaultWidthForContext() {
+    return state.tool === 'pen' ? (state.penStrokeWidth || 2.5) : (state.shapeStrokeWidth || 2);
+  }
   function syncPenWidthUI(w) {
     const input = $('#pen-width-input');
-    if (input) input.value = String(w != null ? w : (state.penStrokeWidth || 2.5));
+    if (input) input.value = String(w != null ? w : defaultWidthForContext());
   }
+  function currentWidthUIValue() {
+    const input = $('#pen-width-input');
+    const v = input ? Number(input.value) : NaN;
+    return Number.isFinite(v) ? v : defaultWidthForContext();
+  }
+  /** "Толщина": applies to every selected shape / line / pen / connector and to new ones. */
   function setPenWidth(w, { applyToSelection = true } = {}) {
     const next = clampPenWidth(w);
-    state.penStrokeWidth = next;
+    const selObjs = [...state.selectedIds]
+      .map((id) => state.objects.find((o) => o.id === id))
+      .filter(hasEditableStroke);
+    const selConns = [...state.selectedConnectorIds]
+      .map((id) => state.connectors.find((c) => c.id === id))
+      .filter(Boolean);
+    const penContext = state.tool === 'pen' || (selObjs.length > 0 && selObjs.every((o) => o.type === 'pen') && !selConns.length);
+    if (penContext) state.penStrokeWidth = next;
+    else state.shapeStrokeWidth = next;
     syncPenWidthUI(next);
     if (!applyToSelection) return;
-    let changed = false;
-    for (const id of state.selectedIds) {
-      const obj = state.objects.find((o) => o.id === id);
-      if (!obj || obj.type !== 'pen') continue;
+    const targets = selObjs.filter((o) => o.strokeWidth !== next);
+    const connTargets = selConns.filter((c) => c.strokeWidth !== next);
+    if (!targets.length && !connTargets.length) return;
+    pushHistory();
+    for (const obj of targets) {
       obj.strokeWidth = next;
       emit('object-update', obj);
-      changed = true;
     }
-    if (changed) draw();
+    for (const conn of connTargets) {
+      conn.strokeWidth = next;
+      emit('connector-update', conn);
+    }
+    draw();
   }
   const penWidthInput = $('#pen-width-input');
   if (penWidthInput) {
@@ -1311,8 +1435,8 @@
   }
   const penDec = $('#pen-width-dec');
   const penInc = $('#pen-width-inc');
-  if (penDec) penDec.addEventListener('click', () => setPenWidth((state.penStrokeWidth || 2.5) - 0.5));
-  if (penInc) penInc.addEventListener('click', () => setPenWidth((state.penStrokeWidth || 2.5) + 0.5));
+  if (penDec) penDec.addEventListener('click', () => setPenWidth(currentWidthUIValue() - 0.5));
+  if (penInc) penInc.addEventListener('click', () => setPenWidth(currentWidthUIValue() + 0.5));
 
   function clampRotation(n) {
     let v = Math.round(Number(n));
@@ -1431,6 +1555,14 @@
       e.preventDefault();
       deleteSelected();
     }
+    // Z-order: Ctrl+] front, Ctrl+[ back, +Shift = one step (e.code → works on any layout)
+    if ((e.ctrlKey || e.metaKey) && (e.code === 'BracketRight' || e.code === 'BracketLeft') && state.view === 'canvas') {
+      e.preventDefault();
+      const up = e.code === 'BracketRight';
+      if (e.shiftKey || e.altKey) reorderSelected(up ? 'forward' : 'backward');
+      else reorderSelected(up ? 'front' : 'back');
+      return;
+    }
     // Undo / Redo / Clipboard
     if ((e.ctrlKey || e.metaKey) && !e.altKey) {
       const k = e.key.toLowerCase();
@@ -1462,6 +1594,10 @@
     }
     if (e.key === 'Escape') {
       e.preventDefault();
+      if (objContextMenuEl && !objContextMenuEl.classList.contains('hidden')) {
+        closeObjectContextMenu();
+        return;
+      }
       // Close panels / editors first
       const dbPanel = $('#db-columns-panel');
       if (dbPanel && !dbPanel.classList.contains('hidden')) {
@@ -1580,6 +1716,31 @@
         state.objects[i] = obj;
         draw();
       }
+    });
+    socket.on('objects-reorder', ({ ids } = {}) => {
+      if (!Array.isArray(ids)) return;
+      const pos = new Map(ids.map((id, i) => [id, i]));
+      const known = state.objects.filter((o) => pos.has(o.id)).sort((a, b) => pos.get(a.id) - pos.get(b.id));
+      const rest = state.objects.filter((o) => !pos.has(o.id));
+      state.objects = [...known, ...rest];
+      draw();
+    });
+    socket.on('room-state', (payload) => {
+      // Full refresh after a room import (sent to everyone in the room)
+      if (!payload || (payload.roomId && payload.roomId !== state.roomId)) return;
+      if (Array.isArray(payload.objects)) state.objects = payload.objects;
+      if (Array.isArray(payload.connectors)) state.connectors = payload.connectors;
+      if (Array.isArray(payload.columns)) state.columns = payload.columns;
+      if (Array.isArray(payload.cards)) state.cards = payload.cards.map((c) => ({ dueDate: null, ...c }));
+      if (Array.isArray(payload.messages)) {
+        state.messages = payload.messages;
+        renderChat();
+      }
+      const ids = new Set(state.objects.map((o) => o.id));
+      for (const id of [...state.selectedIds]) if (!ids.has(id)) state.selectedIds.delete(id);
+      state.selectedConnectorIds.clear();
+      if (state.view === 'kanban' && state.kanbanMode === 'room') renderKanban();
+      draw();
     });
     socket.on('object-delete', ({ ids }) => {
       const set = new Set(ids);
@@ -1721,7 +1882,7 @@
     socket.on('chat-message', (msg) => {
       if (!state.messages.find((m) => m.id === msg.id)) {
         state.messages.push(msg);
-        if (state.messages.length > 100) state.messages = state.messages.slice(-100);
+        if (state.messages.length > 500) state.messages = state.messages.slice(-500);
         appendChatMessage(msg, true);
         maybeNotifyRoomChat(msg);
       }
@@ -2049,6 +2210,187 @@
   }
 
 
+  // ---------- SQL type suggestions (PostgreSQL, MySQL/MariaDB, SQL Server, SQLite, Oracle) ----------
+  // Only suggestions: any free text is still accepted as a column type.
+  function sqlTypeList() {
+    if (sqlTypeList._cache) return sqlTypeList._cache;
+    const groups = [
+      // integers
+      'int', 'integer', 'smallint', 'bigint', 'tinyint', 'mediumint', 'int2', 'int4', 'int8',
+      'serial', 'smallserial', 'bigserial', 'serial4', 'serial8',
+      'int unsigned', 'bigint unsigned', 'tinyint(1)',
+      // exact / approximate numerics
+      'numeric', 'numeric(p,s)', 'numeric(10,2)', 'decimal', 'decimal(p,s)', 'decimal(10,2)', 'decimal(18,4)',
+      'number', 'number(p,s)', 'number(10)', 'number(19,4)',
+      'real', 'float', 'float(p)', 'float4', 'float8', 'double', 'double precision',
+      'binary_float', 'binary_double', 'money', 'smallmoney',
+      // strings
+      'varchar', 'varchar(n)', 'varchar(50)', 'varchar(100)', 'varchar(255)', 'varchar(max)',
+      'char', 'char(n)', 'char(1)', 'char(36)', 'character', 'character varying', 'character varying(n)',
+      'nvarchar', 'nvarchar(n)', 'nvarchar(255)', 'nvarchar(max)', 'nchar', 'nchar(n)',
+      'varchar2', 'varchar2(n)', 'nvarchar2(n)',
+      'text', 'tinytext', 'mediumtext', 'longtext', 'ntext', 'citext', 'string',
+      'clob', 'nclob', 'long',
+      // binary
+      'bytea', 'blob', 'tinyblob', 'mediumblob', 'longblob', 'binary', 'binary(n)',
+      'varbinary', 'varbinary(n)', 'varbinary(max)', 'raw(n)', 'long raw', 'bfile', 'image', 'bit', 'bit(n)', 'bit varying',
+      // boolean / identifiers
+      'boolean', 'bool', 'uuid', 'uniqueidentifier', 'rowid', 'urowid', 'rowversion',
+      // date / time
+      'date', 'time', 'time(p)', 'timetz', 'time with time zone', 'time without time zone',
+      'timestamp', 'timestamp(p)', 'timestamptz', 'timestamp with time zone', 'timestamp without time zone',
+      'timestamp with local time zone', 'datetime', 'datetime2', 'datetime2(p)', 'datetimeoffset', 'smalldatetime',
+      'year', 'interval', 'interval year to month', 'interval day to second',
+      // semi-structured
+      'json', 'jsonb', 'xml', 'xmltype', 'hstore', 'sql_variant',
+      // enum / set / composite / arrays
+      'enum', "enum('a','b')", 'set', "set('a','b')",
+      'int[]', 'integer[]', 'bigint[]', 'text[]', 'varchar[]', 'uuid[]', 'numeric[]', 'boolean[]', 'jsonb[]', 'timestamptz[]',
+      // network
+      'inet', 'cidr', 'macaddr', 'macaddr8',
+      // geometry / spatial
+      'geometry', 'geography', 'point', 'line', 'lseg', 'box', 'path', 'polygon', 'circle',
+      'linestring', 'multipoint', 'multilinestring', 'multipolygon', 'geometrycollection', 'sdo_geometry', 'hierarchyid',
+      // ranges / search / misc (PostgreSQL)
+      'int4range', 'int8range', 'numrange', 'tsrange', 'tstzrange', 'daterange',
+      'tsvector', 'tsquery', 'oid', 'regclass', 'pg_lsn', 'txid_snapshot', 'vector', 'vector(n)',
+      // SQLite affinity / misc
+      'integer primary key', 'any',
+    ];
+    const seen = new Set();
+    sqlTypeList._cache = groups.filter((t) => {
+      const k = t.toLowerCase();
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+    return sqlTypeList._cache;
+  }
+
+  function suggestSqlTypes(query, limit = 12) {
+    const q = String(query || '').trim().toLowerCase();
+    const all = sqlTypeList();
+    if (!q) return all.slice(0, limit);
+    const starts = [];
+    const contains = [];
+    for (const t of all) {
+      const k = t.toLowerCase();
+      if (k === q) continue; // already typed exactly
+      if (k.startsWith(q)) starts.push(t);
+      else if (k.includes(q)) contains.push(t);
+    }
+    return starts.concat(contains).slice(0, limit);
+  }
+
+  let sqlSuggestEl = null;
+  const sqlSuggest = { input: null, items: [], index: -1 };
+
+  function ensureSqlSuggestEl() {
+    if (sqlSuggestEl) return sqlSuggestEl;
+    sqlSuggestEl = document.createElement('div');
+    sqlSuggestEl.className = 'sql-suggest hidden';
+    sqlSuggestEl.setAttribute('role', 'listbox');
+    document.body.appendChild(sqlSuggestEl);
+    // mousedown (not click) so the input keeps focus
+    sqlSuggestEl.addEventListener('mousedown', (e) => {
+      const item = e.target.closest('[data-idx]');
+      if (!item) return;
+      e.preventDefault();
+      acceptSqlSuggestion(Number(item.dataset.idx));
+    });
+    return sqlSuggestEl;
+  }
+
+  function hideSqlSuggest() {
+    if (sqlSuggestEl) sqlSuggestEl.classList.add('hidden');
+    sqlSuggest.items = [];
+    sqlSuggest.index = -1;
+  }
+
+  function sqlSuggestOpen() {
+    return !!(sqlSuggestEl && !sqlSuggestEl.classList.contains('hidden') && sqlSuggest.items.length);
+  }
+
+  function renderSqlSuggest() {
+    const el = ensureSqlSuggestEl();
+    const inp = sqlSuggest.input;
+    if (!inp || !sqlSuggest.items.length || !document.body.contains(inp)) {
+      el.classList.add('hidden');
+      return;
+    }
+    el.innerHTML = sqlSuggest.items.map((t, i) => (
+      `<div class="sql-suggest-item${i === sqlSuggest.index ? ' active' : ''}" role="option" data-idx="${i}">${escapeHtml(t)}</div>`
+    )).join('');
+    const r = inp.getBoundingClientRect();
+    el.classList.remove('hidden');
+    el.style.minWidth = `${Math.max(140, r.width)}px`;
+    el.style.left = `${Math.max(4, Math.min(r.left, window.innerWidth - el.offsetWidth - 4))}px`;
+    const below = r.bottom + 2;
+    const h = el.offsetHeight;
+    el.style.top = `${below + h > window.innerHeight - 4 ? Math.max(4, r.top - h - 2) : below}px`;
+    const active = el.querySelector('.active');
+    if (active && active.scrollIntoView) active.scrollIntoView({ block: 'nearest' });
+  }
+
+  function updateSqlSuggest(inp) {
+    sqlSuggest.input = inp;
+    sqlSuggest.items = suggestSqlTypes(inp.value);
+    sqlSuggest.index = -1; // nothing highlighted until arrows are used
+    renderSqlSuggest();
+  }
+
+  function acceptSqlSuggestion(idx) {
+    const inp = sqlSuggest.input;
+    const val = sqlSuggest.items[idx];
+    if (!inp || val == null) return false;
+    inp.value = val;
+    hideSqlSuggest();
+    inp.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  }
+
+  /** Attach before the generic keydown handler so Enter can be taken over when an item is highlighted. */
+  function attachSqlTypeAutocomplete(inp) {
+    inp.setAttribute('autocomplete', 'off');
+    inp.setAttribute('spellcheck', 'false');
+    inp.addEventListener('focus', () => updateSqlSuggest(inp));
+    inp.addEventListener('input', (e) => {
+      if (e.isTrusted) updateSqlSuggest(inp);
+    });
+    inp.addEventListener('blur', () => {
+      setTimeout(() => { if (sqlSuggest.input === inp && document.activeElement !== inp) hideSqlSuggest(); }, 120);
+    });
+    inp.addEventListener('keydown', (e) => {
+      if (sqlSuggest.input !== inp) return;
+      const open = sqlSuggestOpen();
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        if (!open) { updateSqlSuggest(inp); }
+        if (!sqlSuggest.items.length) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        const n = sqlSuggest.items.length;
+        if (e.key === 'ArrowDown') sqlSuggest.index = sqlSuggest.index < n - 1 ? sqlSuggest.index + 1 : 0;
+        else sqlSuggest.index = sqlSuggest.index > 0 ? sqlSuggest.index - 1 : n - 1;
+        renderSqlSuggest();
+        return;
+      }
+      if ((e.key === 'Enter' || e.key === 'Tab') && open && sqlSuggest.index >= 0) {
+        // Highlighted suggestion: accept it (Enter stays in the field; Tab moves on as usual)
+        if (e.key === 'Enter') e.preventDefault();
+        e.stopImmediatePropagation();
+        acceptSqlSuggestion(sqlSuggest.index);
+        return;
+      }
+      if (e.key === 'Escape' && open) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        hideSqlSuggest();
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') hideSqlSuggest(); // fall through to Enter → next field
+    });
+  }
+
   let dbColumnsEditId = null;
 
   function syncDbColumnsFromDom(obj) {
@@ -2062,12 +2404,14 @@
     rows.forEach((tr) => {
       const nameEl = tr.querySelector('input[data-f="name"]');
       const typeEl = tr.querySelector('input[data-f="type"]');
+      const pkEl = tr.querySelector('input[data-f="pk"]');
       if (!nameEl && !typeEl) return;
       const prev = obj.columns && obj.columns[next.length] ? obj.columns[next.length] : {};
       next.push({
+        ...prev,
         name: (nameEl && nameEl.value) || '',
         type: (typeEl && typeEl.value) || 'text',
-        pk: !!prev.pk,
+        pk: pkEl ? !!pkEl.checked : !!prev.pk,
         unique: !!prev.unique,
         nullable: prev.nullable !== false,
       });
@@ -2134,6 +2478,30 @@
         typeInp.value = col.type || '';
         typeInp.placeholder = 'тип';
         typeInp.autocomplete = 'off';
+        attachSqlTypeAutocomplete(typeInp);
+        const pkTd = document.createElement('td');
+        pkTd.className = 'db-col-pk';
+        const pkInp = document.createElement('input');
+        pkInp.type = 'checkbox';
+        pkInp.dataset.f = 'pk';
+        pkInp.dataset.i = String(idx);
+        pkInp.checked = !!col.pk;
+        pkInp.title = 'Первичный ключ (Primary key)';
+        pkInp.setAttribute('aria-label', 'Первичный ключ');
+        pkInp.addEventListener('change', () => {
+          const o2 = state.objects.find((x) => x.id === dbColumnsEditId);
+          if (!o2) return;
+          ensureDbColumns(o2);
+          const c2 = o2.columns[Number(pkInp.dataset.i)];
+          if (!c2) return;
+          pushHistory();
+          c2.pk = pkInp.checked;
+          if (c2.pk) c2.nullable = false;
+          ensureDbColumns(o2);
+          emit('object-update', o2);
+          draw();
+        });
+        pkTd.appendChild(pkInp);
         const delBtn = document.createElement('button');
         delBtn.type = 'button';
         delBtn.className = 'db-col-del';
@@ -2145,10 +2513,11 @@
         delTd.appendChild(delBtn);
         tr.appendChild(nameTd);
         tr.appendChild(typeTd);
+        tr.appendChild(pkTd);
         tr.appendChild(delTd);
         body.appendChild(tr);
       });
-      body.querySelectorAll('input').forEach((inp) => {
+      body.querySelectorAll('input[data-f="name"], input[data-f="type"]').forEach((inp) => {
         inp.addEventListener('input', () => applyField(inp));
         inp.addEventListener('change', () => applyField(inp));
         inp.addEventListener('keydown', (e) => {
@@ -2296,12 +2665,10 @@
 
   function fitDbHeight(obj) {
     if (!obj || !DB_TYPES.has(obj.type)) return;
+    // Schema/database are containers sized by the user — never auto-fit them.
+    if (obj.type === 'dbSchema' || obj.type === 'dbDatabase') return;
     ensureDbColumns(obj);
-    const rows = (obj.columns && obj.columns.length) || 0;
-    const headerH = 28;
-    const rowH = 22;
-    const minH = obj.type === 'dbSchema' || obj.type === 'dbDatabase' ? 80 : 100;
-    obj.h = Math.max(minH, headerH + 16 + rows * rowH + 8);
+    obj.h = Math.max(60, dbNeededHeight(obj));
   }
 
   const DB_META = {
@@ -2320,27 +2687,57 @@
     return String(raw).split(/\r?\n/).map((s) => s.trimEnd()).filter((s, i, arr) => s.length || i < arr.length - 1);
   }
 
+  /** Font metrics for DB shapes: header AND column rows scale with obj.fontSize. */
+  function dbFontSizes(obj) {
+    const raw = obj && obj.fontSize != null && obj.fontSize !== '' ? Number(obj.fontSize) : NaN;
+    const base = Number.isFinite(raw) ? Math.max(8, Math.min(72, raw)) : 16;
+    const nameFs = Math.max(9, Math.round(base * 0.85));
+    const bodyFs = Math.max(8, Math.round(base * 0.72));
+    const headerH = Math.max(24, nameFs + 14);
+    const lh = Math.round(bodyFs * 1.5);
+    return { nameFs, bodyFs, headerH, lh };
+  }
+
+  function dbHeaderH(obj) {
+    return dbFontSizes(obj).headerH;
+  }
+
+  function dbNeededHeight(obj) {
+    const { headerH, lh } = dbFontSizes(obj);
+    const rows = (obj.columns && obj.columns.length) || 0;
+    return headerH + 8 + rows * lh + 10;
+  }
+
+  /** Grow (never shrink) a table so all rows stay visible, e.g. after a font-size change. */
+  function growDbHeight(obj) {
+    if (!obj || !DB_COLUMN_TYPES.includes(obj.type)) return;
+    ensureDbColumns(obj);
+    const need = dbNeededHeight(obj);
+    if (Math.abs(obj.h || 0) < need) obj.h = need;
+  }
+
   function drawDbEntity(obj) {
     const meta = DB_META[obj.type] || DB_META.dbTable;
     const x = Math.min(obj.x, obj.x + obj.w);
     const y = Math.min(obj.y, obj.y + obj.h);
     const w = Math.abs(obj.w) || 200;
     const h = Math.abs(obj.h) || 120;
-    const headerH = Math.min(28, Math.max(22, h * 0.22));
+    const fsz = dbFontSizes(obj);
+    const headerH = Math.min(fsz.headerH, h);
     const primary = meta.header;
-    // Column names must stay readable on dark table body; obj.textColor is often
-    // the dark palette default (#1f2937) and disappears on the fill.
-    const muted = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#94a3b8';
-    const colNameColor = '#f1f5f9';
-    const colTypeColor = '#cbd5e1';
+    const theme = themeColors();
+    // Body text is painted on a nearly transparent fill, so it must contrast with
+    // the canvas: dark on light themes, light on dark themes.
+    const colNameColor = obj.textColor ? readableColor(obj.textColor) : theme.text;
+    const colTypeColor = theme.muted;
+    const keyColor = theme.light ? '#0369a1' : '#7dd3fc';
     const dashed = obj.type === 'dbView' || obj.type === 'dbSchema';
 
     ctx.fillStyle = obj.fill || 'rgba(14,165,233,0.08)';
-    ctx.strokeStyle = obj.stroke || primary;
+    ctx.strokeStyle = obj.stroke ? displayStrokeColor(obj.stroke) : primary;
     ctx.lineWidth = obj.strokeWidth || 2;
     if (dashed) ctx.setLineDash([7 / Math.max(state.camera.scale, 0.01), 5 / Math.max(state.camera.scale, 0.01)]);
     if (obj.type === 'dbDatabase') {
-      // cylinder-ish rounded rect
       drawRoundedRect(x, y, w, h, 18);
     } else if (obj.type === 'dbSchema') {
       drawRoundedRect(x, y, w, h, 10);
@@ -2371,19 +2768,18 @@
 
     // badge
     ctx.fillStyle = 'rgba(255,255,255,0.92)';
-    ctx.font = `700 ${Math.max(9, Math.min(11, headerH - 10))}px Segoe UI, system-ui, sans-serif`;
+    ctx.font = `700 ${Math.max(9, Math.round(fsz.nameFs * 0.72))}px Segoe UI, system-ui, sans-serif`;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillText(meta.badge, x + 10, y + headerH / 2);
+    const badgeW = ctx.measureText(meta.badge).width + 16;
 
-    // name
+    // name (header text sits on the coloured bar → always white)
     const name = (obj.label || obj.name || meta.defaultLabel || '').trim() || meta.defaultLabel;
     ctx.fillStyle = '#fff';
-    const nameFs = obj.fontSize != null ? Math.min(objectFontSize(obj), headerH - 6) : Math.max(11, Math.min(14, headerH - 8));
-    ctx.font = `600 ${nameFs}px Segoe UI, system-ui, sans-serif`;
-    const badgeW = ctx.measureText(meta.badge).width + 16;
+    ctx.font = `600 ${fsz.nameFs}px Segoe UI, system-ui, sans-serif`;
     let drawn = name;
-    const maxNameW = w - badgeW - 16;
+    const maxNameW = w - badgeW - 16 - (DB_COLUMN_TYPES.includes(obj.type) ? 22 : 0);
     while (drawn.length > 1 && ctx.measureText(drawn).width > maxNameW) drawn = drawn.slice(0, -1);
     if (drawn !== name && drawn.length > 1) drawn = drawn.slice(0, -1) + '…';
     ctx.fillText(drawn, x + 8 + badgeW, y + headerH / 2);
@@ -2394,21 +2790,44 @@
     if (cols.length && obj.type !== 'dbSchema' && obj.type !== 'dbDatabase') {
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
-      const bodyFs = Math.max(10, Math.min(12, (obj.fontSize != null ? objectFontSize(obj) : 12) - 1));
-      const lh = Math.round(bodyFs * 1.35);
+      const bodyFs = fsz.bodyFs;
+      const lh = fsz.lh;
+      const mono = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
       let yy = y + headerH + 8;
       const splitX = x + Math.floor(w * 0.55);
       for (const col of cols) {
-        if (yy + lh > y + h - 4) break;
-        const isKey = !!(col.pk || col.unique);
-        ctx.fillStyle = isKey ? '#7dd3fc' : colNameColor;
-        ctx.font = `${isKey ? '600 ' : ''}${bodyFs}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
-        let n = String(col.name || '');
-        while (n.length > 1 && ctx.measureText(n).width > splitX - x - 14) n = n.slice(0, -1);
-        if (n !== String(col.name || '') && n.length > 1) n = n.slice(0, -1) + '…';
-        ctx.fillText(n || ' ', x + 10, yy);
+        if (!col) continue;
+        if (yy + bodyFs > y + h - 2) break;
+        const isPk = !!col.pk;
+        const isKey = isPk || !!col.unique;
+        let nx = x + 10;
+        if (isPk) {
+          ctx.font = `${bodyFs}px Segoe UI Emoji, Apple Color Emoji, sans-serif`;
+          ctx.fillStyle = keyColor;
+          ctx.fillText('🔑', nx, yy);
+          nx += ctx.measureText('🔑').width + 4;
+        }
+        ctx.fillStyle = isKey ? keyColor : colNameColor;
+        ctx.font = `${isPk ? '700 ' : (isKey ? '600 ' : '')}${bodyFs}px ${mono}`;
+        const full = String(col.name || '');
+        let n = full;
+        const maxW = splitX - nx - 6;
+        while (n.length > 1 && ctx.measureText(n).width > maxW) n = n.slice(0, -1);
+        if (n !== full && n.length > 1) n = n.slice(0, -1) + '…';
+        ctx.fillText(n || ' ', nx, yy);
+        if (isPk && n) {
+          const tw = ctx.measureText(n).width;
+          ctx.save();
+          ctx.strokeStyle = keyColor;
+          ctx.lineWidth = Math.max(1, bodyFs / 12);
+          ctx.beginPath();
+          ctx.moveTo(nx, yy + bodyFs + 1.5);
+          ctx.lineTo(nx + tw, yy + bodyFs + 1.5);
+          ctx.stroke();
+          ctx.restore();
+        }
         ctx.fillStyle = colTypeColor;
-        ctx.font = `${bodyFs}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
+        ctx.font = `${bodyFs}px ${mono}`;
         let tp = String(col.type || '');
         while (tp.length > 1 && ctx.measureText(tp).width > x + w - splitX - 12) tp = tp.slice(0, -1);
         if (tp !== String(col.type || '') && tp.length > 1) tp = tp.slice(0, -1) + '…';
@@ -2416,11 +2835,14 @@
         yy += lh;
       }
     } else if (obj.type === 'dbSchema' || obj.type === 'dbDatabase') {
-      ctx.fillStyle = muted;
+      ctx.fillStyle = theme.muted;
       ctx.font = `${Math.max(11, Math.min(12, h * 0.12))}px Segoe UI, system-ui, sans-serif`;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
-      ctx.fillText(meta.title, x + 10, y + headerH + 10);
+      const hint = obj.type === 'dbSchema'
+        ? (state.objects.some((o) => o.parentId === obj.id) ? '' : 'Схема: перетащите таблицы внутрь')
+        : meta.title;
+      if (hint) ctx.fillText(hint, x + 10, y + headerH + 10);
     }
     ctx.textAlign = 'start';
     ctx.textBaseline = 'alphabetic';
@@ -2429,7 +2851,7 @@
   function drawObject(obj, { selected = false, hovered = false } = {}) {
     ctx.save();
     ctx.lineWidth = obj.strokeWidth || 2;
-    ctx.strokeStyle = obj.stroke || '#1f2937';
+    ctx.strokeStyle = displayStrokeColor(obj.stroke);
     ctx.fillStyle = obj.fill || 'transparent';
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
@@ -2461,7 +2883,7 @@
       if (obj.fill && obj.fill !== 'transparent') ctx.fill();
       ctx.stroke();
       if (obj.label) {
-        ctx.fillStyle = objectTextColor(obj);
+        ctx.fillStyle = displayTextColor(obj);
         ctx.font = `${objectFontSize(obj)}px Segoe UI, system-ui, sans-serif`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
@@ -2479,7 +2901,7 @@
       if (obj.fill && obj.fill !== 'transparent') ctx.fill();
       ctx.stroke();
       if (obj.label) {
-        ctx.fillStyle = objectTextColor(obj);
+        ctx.fillStyle = displayTextColor(obj);
         ctx.font = `${objectFontSize(obj)}px Segoe UI, system-ui, sans-serif`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
@@ -2496,7 +2918,7 @@
       if (obj.fill && obj.fill !== 'transparent') ctx.fill();
       ctx.stroke();
       if (obj.label) {
-        ctx.fillStyle = objectTextColor(obj);
+        ctx.fillStyle = displayTextColor(obj);
         ctx.font = `${objectFontSize(obj)}px Segoe UI, system-ui, sans-serif`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
@@ -2513,7 +2935,7 @@
       if (obj.fill && obj.fill !== 'transparent') ctx.fill();
       ctx.stroke();
       if (obj.label) {
-        ctx.fillStyle = objectTextColor(obj);
+        ctx.fillStyle = displayTextColor(obj);
         ctx.font = `${objectFontSize(obj)}px Segoe UI, system-ui, sans-serif`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
@@ -2523,7 +2945,7 @@
       }
     } else if (obj.type === 'line' || obj.type === 'arrow') {
       drawSegmentWithHeads(obj.x1, obj.y1, obj.x2, obj.y2, {
-        stroke: obj.stroke || '#1f2937',
+        stroke: displayStrokeColor(obj.stroke),
         strokeWidth: obj.strokeWidth || 2,
         heads: resolveArrowHeads(obj),
         dash: resolveLineDash(obj),
@@ -2540,7 +2962,7 @@
         const off = 12;
         const lx = mx + (-ady / alen) * off;
         const ly = my + (adx / alen) * off;
-        ctx.fillStyle = objectTextColor(obj);
+        ctx.fillStyle = displayTextColor(obj);
         ctx.font = `${objectFontSize(obj)}px Segoe UI, system-ui, sans-serif`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
@@ -2577,7 +2999,7 @@
       const title = roomLinkTitle(obj);
       const rid = normalizeRoomCode(obj.roomId);
       ctx.textAlign = 'left';
-      ctx.fillStyle = obj.textColor || textCol;
+      ctx.fillStyle = readableColor(obj.textColor || textCol);
       const titleFs = obj.fontSize != null ? objectFontSize(obj) : Math.max(12, Math.min(14, h * 0.2));
       ctx.font = `600 ${titleFs}px Segoe UI, system-ui, sans-serif`;
       const titleY = y + 10 + badgeH + 16;
@@ -2621,7 +3043,7 @@
       ctx.strokeRect(x + 6, y + headerH + 4, Math.max(0, w - 12), Math.max(0, h - headerH - 10));
       // title
       const title = cardLinkTitle(obj);
-      ctx.fillStyle = obj.textColor || textCol;
+      ctx.fillStyle = readableColor(obj.textColor || textCol);
       const titleFs = obj.fontSize != null ? objectFontSize(obj) : Math.max(12, Math.min(14, h * 0.16));
       ctx.font = `600 ${titleFs}px Segoe UI, system-ui, sans-serif`;
       ctx.textAlign = 'left';
@@ -2664,7 +3086,7 @@
       drawRoundedRect(obj.x, obj.y, w, h, 4);
       ctx.fill();
       ctx.stroke();
-      ctx.fillStyle = objectTextColor(obj);
+      ctx.fillStyle = displayTextColor(obj);
       ctx.font = `${fs}px Segoe UI, system-ui, sans-serif`;
       wrapText(ctx, obj.text || '', obj.x + 10, obj.y + Math.max(18, fs + 6), w - 20, Math.round(fs * 1.25));
     } else if (obj.type === 'text') {
@@ -2673,7 +3095,7 @@
       const th = Math.max(fs * 1.2, obj.h || fs * 1.4);
       if (obj.w == null) obj.w = tw;
       if (obj.h == null) obj.h = th;
-      ctx.fillStyle = objectTextColor(obj);
+      ctx.fillStyle = displayTextColor(obj);
       ctx.font = `${fs}px Segoe UI, system-ui, sans-serif`;
       ctx.textBaseline = 'top';
       wrapText(ctx, obj.text || '', obj.x, obj.y, tw, Math.round(fs * 1.25));
@@ -2737,7 +3159,7 @@
     if (!ep) return;
     ctx.save();
     if (hovered && !selected) ctx.globalAlpha = 0.85;
-    let stroke = conn.stroke || '#64748b';
+    let stroke = displayStrokeColor(conn.stroke || '#64748b');
     if (selected) {
       stroke = getComputedStyle(document.documentElement).getPropertyValue('--selection').trim() || '#3b82f6';
     }
@@ -2899,8 +3321,9 @@
 
   function hitTest(wx, wy) {
     let cardLinkHit = null;
-    for (let i = state.objects.length - 1; i >= 0; i--) {
-      const obj = state.objects[i];
+    const order = renderOrder();
+    for (let i = order.length - 1; i >= 0; i--) {
+      const obj = order[i];
       const b = boundsOfUnrotated(obj);
       if (!b) continue;
       const pad = 6 / state.camera.scale;
@@ -2910,7 +3333,8 @@
         lx = local.x; ly = local.y;
       }
       if (lx >= b.x - pad && lx <= b.x + b.w + pad && ly >= b.y - pad && ly <= b.y + b.h + pad) {
-        if (obj.type === 'cardLink') {
+        if (isContainerType(obj.type)) {
+          // Containers (task frame, DB schema) are picked only if nothing inside is hit
           if (!cardLinkHit) cardLinkHit = obj;
           continue;
         }
@@ -3072,14 +3496,21 @@
         hovered: state.hoverConnectorId === conn.id,
       });
     }
-    for (const obj of state.objects) {
-      drawObject(obj, {
-        selected: state.selectedIds.has(obj.id),
-        hovered: state.hoverId === obj.id && !state.selectedIds.has(obj.id),
-      });
+    for (const obj of renderOrder()) {
+      try {
+        drawObject(obj, {
+          selected: state.selectedIds.has(obj.id),
+          hovered: state.hoverId === obj.id && !state.selectedIds.has(obj.id),
+        });
+      } catch (err) {
+        // One malformed object (e.g. from an imported file) must not kill rendering.
+        try { ctx.restore(); } catch { /* ignore */ }
+        if (!draw._warned) { draw._warned = true; console.warn('drawObject failed', obj, err); }
+      }
     }
     for (const p of (state.pendingPens || [])) drawObject(p, {});
     if (state.drawing) drawObject(state.drawing, {});
+    drawRotationGuide();
     // preview connector line
     if (state.tool === 'connector' && state.connectorFromId && state._connectorPreview) {
       const from = state.objects.find((o) => o.id === state.connectorFromId);
@@ -3116,6 +3547,36 @@
     updateZoomLabel();
     renderCursors();
     updateArrowStyleMenu();
+  }
+
+  /** Dashed guide through the centre while a rotation is snapped to 0/90/180/270°. */
+  function drawRotationGuide() {
+    const r = state.rotating;
+    if (!r || r.snapped == null) return;
+    const obj = state.objects.find((o) => o.id === r.id);
+    if (!obj) return;
+    const c = r.center || centerOf(obj);
+    if (!c) return;
+    const rad = (r.snapped * Math.PI) / 180;
+    const dx = Math.sin(rad);
+    const dy = -Math.cos(rad);
+    const L = 5000 / Math.max(state.camera.scale, 0.05);
+    ctx.save();
+    ctx.strokeStyle = themeColors().selection || '#3b82f6';
+    ctx.globalAlpha = 0.85;
+    ctx.lineWidth = 1.25 / state.camera.scale;
+    ctx.setLineDash([8 / state.camera.scale, 6 / state.camera.scale]);
+    ctx.beginPath();
+    ctx.moveTo(c.x - dx * L, c.y - dy * L);
+    ctx.lineTo(c.x + dx * L, c.y + dy * L);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.font = `600 ${12 / state.camera.scale}px Segoe UI, system-ui, sans-serif`;
+    const deg = ((Math.round(r.snapped) % 360) + 360) % 360;
+    ctx.fillText(`${deg}°`, c.x + 8 / state.camera.scale, c.y - 8 / state.camera.scale);
+    ctx.restore();
   }
 
   function getLocalPoint(e) {
@@ -3156,6 +3617,21 @@
         if (!objIds.length && !connIds.length) {
           draw();
           return;
+        }
+      }
+      {
+        // Deleting a DB schema keeps its tables on the canvas (just detached).
+        const schemaIds = new Set(objIds.filter((id) => {
+          const o = state.objects.find((x) => x.id === id);
+          return o && o.type === 'dbSchema';
+        }));
+        if (schemaIds.size) {
+          for (const obj of state.objects) {
+            if (obj.parentId && schemaIds.has(obj.parentId) && !objIds.includes(obj.id)) {
+              obj.parentId = null;
+              emit('object-update', obj);
+            }
+          }
         }
       }
       const delSet = new Set(objIds);
@@ -3352,15 +3828,96 @@
     return state.objects.filter((o) => o.parentId === cardLinkId);
   }
 
+  /** Container shapes that carry children via obj.parentId (task frame, DB schema). */
+  function isContainerType(type) {
+    return type === 'cardLink' || type === 'dbSchema';
+  }
+
+  /** Types a DB schema can hold. */
+  function schemaAcceptsType(type) {
+    return type === 'dbTable' || type === 'dbView' || type === 'dbEnum' || type === 'dbIndex'
+      || type === 'dbProcedure' || type === 'dbTrigger';
+  }
+
+  function containerAccepts(container, obj) {
+    if (!container || !obj || container.id === obj.id) return false;
+    if (container.type === 'cardLink') return obj.type !== 'cardLink';
+    if (container.type === 'dbSchema') return schemaAcceptsType(obj.type);
+    return false;
+  }
+
+  /**
+   * Draw order: array order, except that children are painted right after their
+   * container (so tables dropped into a schema are always above it).
+   * Function declaration (hoisted) + no late const → safe to call from draw() at startup.
+   */
+  function renderOrder() {
+    const objs = state.objects || [];
+    const byId = new Map(objs.map((o) => [o.id, o]));
+    const kids = new Map();
+    const roots = [];
+    for (const o of objs) {
+      const p = o && o.parentId ? byId.get(o.parentId) : null;
+      if (p && p !== o && isContainerType(p.type)) {
+        if (!kids.has(p.id)) kids.set(p.id, []);
+        kids.get(p.id).push(o);
+      } else {
+        roots.push(o);
+      }
+    }
+    if (!kids.size) return objs;
+    const out = [];
+    const seen = new Set();
+    const visit = (o) => {
+      if (!o || seen.has(o.id)) return;
+      seen.add(o.id);
+      out.push(o);
+      const ch = kids.get(o.id);
+      if (ch) ch.forEach(visit);
+    };
+    roots.forEach(visit);
+    for (const o of objs) if (o && !seen.has(o.id)) { seen.add(o.id); out.push(o); } // cycles
+    return out;
+  }
+
+  function descendantIds(id) {
+    const out = new Set();
+    const stack = [id];
+    while (stack.length) {
+      const cur = stack.pop();
+      for (const o of state.objects) {
+        if (o.parentId === cur && !out.has(o.id) && o.id !== id) {
+          out.add(o.id);
+          stack.push(o.id);
+        }
+      }
+    }
+    return out;
+  }
+
   function expandDragIdsWithChildren(ids) {
     const out = new Set(ids);
     for (const id of ids) {
       const o = state.objects.find((x) => x.id === id);
-      if (o && o.type === 'cardLink') {
-        for (const ch of childrenOfCardLink(id)) out.add(ch.id);
+      if (o && isContainerType(o.type)) {
+        for (const d of descendantIds(id)) out.add(d);
       }
     }
     return [...out];
+  }
+
+  /** Topmost container under (wx, wy) that accepts `obj` (not obj itself / its descendants). */
+  function findContainerAtPoint(wx, wy, obj) {
+    const skip = obj ? descendantIds(obj.id) : new Set();
+    const order = renderOrder();
+    for (let i = order.length - 1; i >= 0; i--) {
+      const o = order[i];
+      if (!isContainerType(o.type) || skip.has(o.id)) continue;
+      if (obj && !containerAccepts(o, obj)) continue;
+      const b = boundsOf(o);
+      if (b && pointInRect(wx, wy, b)) return o;
+    }
+    return null;
   }
 
   function findCardLinkAtPoint(wx, wy, excludeId) {
@@ -3373,6 +3930,7 @@
     return null;
   }
 
+  /** After a drag: drop into / detach from containers based on the object centre. */
   function reparentAfterDrag(movedIds) {
     for (const id of movedIds) {
       const obj = state.objects.find((o) => o.id === id);
@@ -3386,7 +3944,7 @@
       }
       const c = centerOf(obj);
       if (!c) continue;
-      const host = findCardLinkAtPoint(c.x, c.y, obj.id);
+      const host = findContainerAtPoint(c.x, c.y, obj);
       const newParent = host ? host.id : null;
       if ((obj.parentId || null) !== newParent) {
         obj.parentId = newParent;
@@ -3394,6 +3952,198 @@
       }
     }
   }
+
+  /** New schema drawn over existing tables adopts them. */
+  function adoptChildrenIntoSchema(schema) {
+    if (!schema || schema.type !== 'dbSchema') return;
+    const b = boundsOf(schema);
+    if (!b) return;
+    for (const o of state.objects) {
+      if (o.id === schema.id || o.parentId || !schemaAcceptsType(o.type)) continue;
+      const c = centerOf(o);
+      if (c && pointInRect(c.x, c.y, b)) {
+        o.parentId = schema.id;
+        emit('object-update', o);
+      }
+    }
+  }
+
+  /** Context action: put selected tables into a schema (moved inside, schema grows). */
+  function addSelectionToSchema(schemaId) {
+    const schema = state.objects.find((o) => o.id === schemaId && o.type === 'dbSchema');
+    if (!schema) return;
+    const items = [...state.selectedIds]
+      .map((id) => state.objects.find((o) => o.id === id))
+      .filter((o) => o && schemaAcceptsType(o.type) && o.parentId !== schemaId);
+    if (!items.length) return;
+    pushHistory();
+    const sb = boundsOfUnrotated(schema);
+    const pad = 16;
+    const headerH = dbHeaderH(schema);
+    let curX = sb.x + pad;
+    let curY = sb.y + headerH + pad;
+    // stack new tables below already contained ones
+    for (const ch of state.objects.filter((o) => o.parentId === schemaId)) {
+      const cb = boundsOf(ch);
+      if (cb) curY = Math.max(curY, cb.y + cb.h + pad);
+    }
+    let rowH = 0;
+    for (const o of items) {
+      const ob = boundsOf(o);
+      const inside = ob && ob.x >= sb.x && ob.y >= sb.y + headerH && ob.x + ob.w <= sb.x + sb.w && ob.y + ob.h <= sb.y + sb.h;
+      if (!inside && ob) {
+        if (curX > sb.x + pad && curX + ob.w > sb.x + Math.max(sb.w, 480) - pad) {
+          curX = sb.x + pad;
+          curY += rowH + pad;
+          rowH = 0;
+        }
+        const orig = structuredClone(o);
+        applyDelta(o, orig, curX - ob.x, curY - ob.y);
+        curX += ob.w + pad;
+        rowH = Math.max(rowH, ob.h);
+      }
+      o.parentId = schemaId;
+      emit('object-update', o);
+    }
+    // grow schema to fit children
+    let maxX = sb.x + sb.w;
+    let maxY = sb.y + sb.h;
+    for (const ch of state.objects.filter((o) => o.parentId === schemaId)) {
+      const cb = boundsOf(ch);
+      if (!cb) continue;
+      maxX = Math.max(maxX, cb.x + cb.w + pad);
+      maxY = Math.max(maxY, cb.y + cb.h + pad);
+    }
+    if (maxX > sb.x + sb.w || maxY > sb.y + sb.h) {
+      schema.x = sb.x;
+      schema.y = sb.y;
+      schema.w = maxX - sb.x;
+      schema.h = maxY - sb.y;
+      emit('object-update', schema);
+    }
+    draw();
+    toast(`Добавлено в схему: ${items.length}`);
+  }
+
+  function detachSelectionFromContainers() {
+    const items = [...state.selectedIds]
+      .map((id) => state.objects.find((o) => o.id === id))
+      .filter((o) => o && o.parentId);
+    if (!items.length) return;
+    pushHistory();
+    for (const o of items) {
+      o.parentId = null;
+      emit('object-update', o);
+    }
+    draw();
+  }
+
+  // ---------- Z-order ----------
+  function emitObjectOrder() {
+    emit('objects-reorder', { ids: state.objects.map((o) => o.id) });
+  }
+
+  /** kind: 'front' | 'back' | 'forward' | 'backward' */
+  function reorderSelected(kind) {
+    if (state.view !== 'canvas' || !state.selectedIds.size) return;
+    const sel = state.selectedIds;
+    let arr = state.objects.slice();
+    if (kind === 'front') {
+      arr = [...arr.filter((o) => !sel.has(o.id)), ...arr.filter((o) => sel.has(o.id))];
+    } else if (kind === 'back') {
+      arr = [...arr.filter((o) => sel.has(o.id)), ...arr.filter((o) => !sel.has(o.id))];
+    } else if (kind === 'forward') {
+      for (let i = arr.length - 2; i >= 0; i--) {
+        if (sel.has(arr[i].id) && !sel.has(arr[i + 1].id)) {
+          const t = arr[i]; arr[i] = arr[i + 1]; arr[i + 1] = t;
+        }
+      }
+    } else if (kind === 'backward') {
+      for (let i = 1; i < arr.length; i++) {
+        if (sel.has(arr[i].id) && !sel.has(arr[i - 1].id)) {
+          const t = arr[i]; arr[i] = arr[i - 1]; arr[i - 1] = t;
+        }
+      }
+    } else return;
+    const same = arr.every((o, i) => o === state.objects[i]);
+    if (same) return;
+    pushHistory();
+    state.objects = arr;
+    emitObjectOrder();
+    draw();
+  }
+
+  // ---------- Object context menu (right click on an object) ----------
+  let objContextMenuEl = null;
+
+  function closeObjectContextMenu() {
+    if (objContextMenuEl) objContextMenuEl.classList.add('hidden');
+  }
+
+  function openObjectContextMenu(clientX, clientY) {
+    if (!state.selectedIds.size) return;
+    if (!objContextMenuEl) {
+      objContextMenuEl = document.createElement('div');
+      objContextMenuEl.id = 'obj-context-menu';
+      objContextMenuEl.className = 'obj-context-menu hidden';
+      objContextMenuEl.setAttribute('role', 'menu');
+      document.body.appendChild(objContextMenuEl);
+      objContextMenuEl.addEventListener('pointerdown', (e) => e.stopPropagation());
+      objContextMenuEl.addEventListener('contextmenu', (e) => e.preventDefault());
+      objContextMenuEl.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-act]');
+        if (!btn) return;
+        e.preventDefault();
+        const act = btn.dataset.act;
+        closeObjectContextMenu();
+        if (act === 'front' || act === 'back' || act === 'forward' || act === 'backward') reorderSelected(act);
+        else if (act === 'to-schema') addSelectionToSchema(btn.dataset.id);
+        else if (act === 'detach') detachSelectionFromContainers();
+        else if (act === 'delete') deleteSelected();
+      });
+    }
+    const selObjs = [...state.selectedIds].map((id) => state.objects.find((o) => o.id === id)).filter(Boolean);
+    const isMac = /Mac/i.test(navigator.platform || '');
+    const mod = isMac ? '⌘' : 'Ctrl';
+    const items = [
+      `<button type="button" data-act="front">На передний план<span>${mod}+]</span></button>`,
+      `<button type="button" data-act="forward">Вперёд на один<span>${mod}+Shift+]</span></button>`,
+      `<button type="button" data-act="backward">Назад на один<span>${mod}+Shift+[</span></button>`,
+      `<button type="button" data-act="back">На задний план<span>${mod}+[</span></button>`,
+    ];
+    const tables = selObjs.filter((o) => schemaAcceptsType(o.type));
+    if (tables.length) {
+      const schemas = state.objects.filter((o) => o.type === 'dbSchema' && !state.selectedIds.has(o.id));
+      if (schemas.length) {
+        items.push('<hr/>');
+        for (const sc of schemas.slice(0, 8)) {
+          const nm = (sc.label || sc.name || 'schema').trim() || 'schema';
+          items.push(`<button type="button" data-act="to-schema" data-id="${escapeHtml(sc.id)}">Добавить в схему «${escapeHtml(nm)}»</button>`);
+        }
+      }
+    }
+    if (selObjs.some((o) => o.parentId)) {
+      items.push('<hr/>');
+      items.push('<button type="button" data-act="detach">Убрать из контейнера</button>');
+    }
+    items.push('<hr/>');
+    items.push('<button type="button" data-act="delete" class="danger">Удалить<span>Del</span></button>');
+    objContextMenuEl.innerHTML = items.join('');
+    objContextMenuEl.classList.remove('hidden');
+    const mw = objContextMenuEl.offsetWidth || 220;
+    const mh = objContextMenuEl.offsetHeight || 180;
+    const left = Math.max(4, Math.min(clientX, window.innerWidth - mw - 4));
+    const top = Math.max(4, Math.min(clientY, window.innerHeight - mh - 4));
+    objContextMenuEl.style.left = `${left}px`;
+    objContextMenuEl.style.top = `${top}px`;
+  }
+
+  document.addEventListener('pointerdown', (e) => {
+    if (objContextMenuEl && !objContextMenuEl.classList.contains('hidden') && !objContextMenuEl.contains(e.target)) {
+      closeObjectContextMenu();
+    }
+  }, true);
+  window.addEventListener('blur', () => closeObjectContextMenu());
 
   function openRoomLinkPanel(obj) {
     if (!obj || obj.type !== 'roomLink') return;
@@ -3479,7 +4229,7 @@
     cancelInlineEdit(true);
     const b = boundsOfUnrotated(obj) || boundsOf(obj);
     if (!b) return;
-    const headerH = Math.min(28, Math.max(22, b.h * 0.22));
+    const headerH = Math.min(dbHeaderH(obj), b.h);
     const tl = screenFromWorld(b.x, b.y + headerH);
     const br = screenFromWorld(b.x + b.w, b.y + b.h);
     inlineEditEl.classList.remove('hidden');
@@ -3489,7 +4239,7 @@
     inlineEditEl.style.width = `${Math.max(80, br.x - tl.x)}px`;
     inlineEditEl.style.height = `${Math.max(40, br.y - tl.y)}px`;
     inlineEditEl.style.fontSize = `${12 * state.camera.scale}px`;
-    inlineEditEl.style.color = objectTextColor(obj);
+    inlineEditEl.style.color = '#f8fafc';
     inlineEditEl.style.background = 'rgba(0,0,0,0.45)';
     inlineEditEl.style.zIndex = '30';
     const initial = obj.text || '';
@@ -3514,8 +4264,8 @@
     state.textColor = objectTextColor(obj);
     syncFontSizeUI(objectFontSize(obj));
     syncColorUI(state.textColor);
-    cancelInlineEdit(true);
-    const editFs = objectFontSize(obj);
+    cancelInlineEdit(true, obj.id);
+    const editFs = DB_TYPES.has(obj.type) ? dbFontSizes(obj).nameFs : objectFontSize(obj);
     let tl, br;
     if (isArrowLike) {
       // Edit box centered on midpoint, slightly above the segment
@@ -3534,7 +4284,7 @@
     } else {
       const b = boundsOfUnrotated(obj) || boundsOf(obj);
       if (!b) return;
-      const headerH = isDb ? Math.min(28, Math.max(22, b.h * 0.22)) : b.h;
+      const headerH = isDb ? Math.min(dbHeaderH(obj), b.h) : b.h;
       const editTop = isDb ? b.y : b.y;
       const editH = isDb ? headerH : b.h;
       tl = screenFromWorld(b.x, editTop);
@@ -3547,7 +4297,7 @@
     inlineEditEl.style.width = `${Math.max(80, br.x - tl.x)}px`;
     inlineEditEl.style.height = `${Math.max(isDb ? 24 : 28, br.y - tl.y)}px`;
     inlineEditEl.style.fontSize = `${editFs * state.camera.scale}px`;
-    inlineEditEl.style.color = isDb ? '#ffffff' : objectTextColor(obj);
+    inlineEditEl.style.color = isDb ? '#ffffff' : displayTextColor(obj);
     inlineEditEl.style.background = isDb ? 'rgba(0,0,0,0.35)' : (isArrowLike ? 'rgba(0,0,0,0.55)' : '');
     inlineEditEl.style.zIndex = '30';
     inlineEditEl.style.textAlign = isArrowLike ? 'center' : '';
@@ -3587,6 +4337,13 @@
     inlineEditEl.style.background = '';
     inlineEditEl.style.textAlign = '';
     if (!obj) return;
+    if (obj.type === 'text' && field === 'text' && !value.trim()) {
+      // Empty text is not kept on the canvas (new or edited to empty).
+      if ((obj.text || '').trim()) pushHistory();
+      removeObjectsLocal([obj.id]);
+      draw();
+      return;
+    }
     if (field === 'text') obj.text = value;
     else obj.label = value;
     emit('object-update', obj);
@@ -3595,11 +4352,29 @@
     draw();
   }
 
-  function cancelInlineEdit(silent) {
+  /** Remove objects locally + on the server (with their connectors). */
+  function removeObjectsLocal(ids) {
+    const set = new Set(ids);
+    if (!set.size) return;
+    state.objects = state.objects.filter((o) => !set.has(o.id));
+    state.connectors = state.connectors.filter((c) => !set.has(c.fromId) && !set.has(c.toId));
+    for (const id of set) state.selectedIds.delete(id);
+    emit('object-delete', { ids: [...set] });
+  }
+
+  function cancelInlineEdit(silent, keepId) {
     pendingInlineEditId = null;
     if (!state.inlineEdit) {
       inlineEditEl.classList.add('hidden');
       return;
+    }
+    {
+      const editedId = state.inlineEdit.id;
+      const edited = state.objects.find((o) => o.id === editedId);
+      if (edited && edited.type === 'text' && editedId !== keepId && !(edited.text || '').trim()) {
+        removeObjectsLocal([editedId]);
+        silent = false;
+      }
     }
     state.inlineEdit = null;
     inlineEditIgnoreBlurUntil = 0;
@@ -3928,6 +4703,7 @@
 
   canvasWrap.addEventListener('wheel', (e) => {
     e.preventDefault();
+    closeObjectContextMenu();
     const pt = getLocalPoint(e);
     const before = worldFromScreen(pt.x, pt.y);
     const factor = e.deltaY < 0 ? 1.1 : 0.9;
@@ -4006,7 +4782,7 @@
         fromId: state.connectorFromId,
         toId: hit.id,
         stroke: state.strokeColor,
-        strokeWidth: 2,
+        strokeWidth: state.shapeStrokeWidth || 2,
         arrow: true,
         heads: 'end',
         dash: 'solid',
@@ -4042,6 +4818,18 @@
       if (rightBtn) {
         e.preventDefault();
         try { canvasWrap.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+        // Right *click* on an object opens its context menu (decided on pointerup);
+        // right *drag* stays a marquee selection, as before.
+        {
+          const rHit = hitTest(world.x, world.y);
+          state.rightClick = {
+            sx: e.clientX,
+            sy: e.clientY,
+            hitId: rHit ? rHit.id : null,
+            prevSel: new Set(state.selectedIds),
+            prevConn: new Set(state.selectedConnectorIds),
+          };
+        }
         state.marquee = {
           x1: world.x,
           y1: world.y,
@@ -4068,6 +4856,8 @@
               center: c,
               startAngle: Math.atan2(world.y - c.y, world.x - c.x),
               origRotation: sel.rotation || 0,
+              snapped: null,
+              before: cloneBoard(),
             };
             return;
           }
@@ -4078,6 +4868,7 @@
               corner,
               start: world,
               orig: structuredClone(sel),
+              before: cloneBoard(),
               childOriginals: sel.type === 'cardLink'
                 ? Object.fromEntries(childrenOfCardLink(sel.id).map((o) => [o.id, structuredClone(o)]))
                 : null,
@@ -4135,21 +4926,35 @@
       lastClick = { time: now, id: hit ? hit.id : null };
 
       if (hit) {
-        if (!e.shiftKey) {
+        const alreadySelected = state.selectedIds.has(hit.id);
+        if (e.shiftKey && alreadySelected) {
+          // Shift+click on a selected object toggles it off
+          state.selectedIds.delete(hit.id);
+          syncColorTargetFromSelection();
+          draw();
+          return;
+        }
+        if (!e.shiftKey && !alreadySelected) {
+          // Clicking an object outside the selection starts a new selection.
+          // Clicking one that is already selected keeps the whole group,
+          // so dragging moves every selected object together.
           state.selectedIds.clear();
           state.selectedConnectorIds.clear();
         }
         state.selectedIds.add(hit.id);
         syncColorTargetFromSelection();
         {
-          const primaryIds = [...state.selectedIds];
+          const primaryIds = [...state.selectedIds].filter((id) => state.objects.some((o) => o.id === id));
           const dragIds = expandDragIdsWithChildren(primaryIds);
+          const dragSet = new Set(dragIds);
           state.dragging = {
             ids: dragIds,
             primaryIds,
             start: world,
+            moved: false,
+            before: cloneBoard(),
             originals: Object.fromEntries(
-              state.objects.filter((o) => dragIds.includes(o.id)).map((o) => [o.id, structuredClone(o)])
+              state.objects.filter((o) => dragSet.has(o.id)).map((o) => [o.id, structuredClone(o)])
             ),
           };
         }
@@ -4195,7 +5000,7 @@
         h: 0,
         stroke: state.strokeColor,
         fill: state.tool === 'cardLink' ? 'rgba(34,197,94,0.08)' : (isDb ? 'rgba(14,165,233,0.08)' : 'transparent'),
-        strokeWidth: 2,
+        strokeWidth: state.shapeStrokeWidth || 2,
         label: isDb ? (meta && meta.defaultLabel) || '' : '',
         text: isDb ? (meta && meta.defaultAttrs) || '' : '',
         textColor: state.textColor,
@@ -4229,7 +5034,7 @@
         x2: world.x,
         y2: world.y,
         stroke: state.strokeColor,
-        strokeWidth: 2,
+        strokeWidth: state.shapeStrokeWidth || 2,
         label: '',
         textColor: state.textColor,
         fontSize: state.fontSize || 14,
@@ -4249,7 +5054,7 @@
         h: 72,
         stroke: state.strokeColor,
         fill: 'rgba(59,130,246,0.14)',
-        strokeWidth: 2,
+        strokeWidth: state.shapeStrokeWidth || 2,
         roomId: '',
         label: '',
         text: '',
@@ -4340,8 +5145,18 @@
         const c = state.rotating.center;
         const ang = Math.atan2(world.y - c.y, world.x - c.x);
         let deg = state.rotating.origRotation + ((ang - state.rotating.startAngle) * 180) / Math.PI;
-        deg = ((Math.round(deg) % 360) + 360) % 360;
+        deg = ((deg % 360) + 360) % 360; // 0..360 (float)
+        // Soft snap to right angles: only inside ±1.5°, so rotating further just
+        // continues past the guide. Shift disables snapping.
+        let snapped = null;
+        if (!e.shiftKey) {
+          for (const t of [0, 90, 180, 270, 360]) {
+            if (Math.abs(deg - t) <= 1.5) { snapped = t % 360; break; }
+          }
+        }
+        deg = snapped != null ? snapped : Math.round(deg) % 360;
         if (deg > 180) deg -= 360;
+        state.rotating.snapped = snapped;
         obj.rotation = deg;
         emit('object-update', obj);
         syncRotationUI(deg);
@@ -4394,6 +5209,7 @@
     if (state.dragging) {
       const dx = world.x - state.dragging.start.x;
       const dy = world.y - state.dragging.start.y;
+      if (dx || dy) state.dragging.moved = true;
       for (const id of state.dragging.ids) {
         const orig = state.dragging.originals[id];
         const obj = state.objects.find((o) => o.id === id);
@@ -4470,31 +5286,62 @@
     draw();
   }
 
-  canvasWrap.addEventListener('pointerup', () => {
+  canvasWrap.addEventListener('pointerup', (e) => {
     flushPendingInlineEdit();
+    if (state.rightClick) {
+      const rc = state.rightClick;
+      state.rightClick = null;
+      const tiny = Math.abs((e.clientX || 0) - rc.sx) < 5 && Math.abs((e.clientY || 0) - rc.sy) < 5;
+      if (tiny && rc.hitId && state.objects.some((o) => o.id === rc.hitId)) {
+        state.marquee = null;
+        if (rc.prevSel.has(rc.hitId)) {
+          state.selectedIds = new Set(rc.prevSel);
+          state.selectedConnectorIds = new Set(rc.prevConn);
+        } else {
+          state.selectedIds = new Set([rc.hitId]);
+          state.selectedConnectorIds.clear();
+        }
+        syncColorTargetFromSelection();
+        draw();
+        openObjectContextMenu(e.clientX, e.clientY);
+        return;
+      }
+    }
     finishMarqueeIfAny();
     if (state.panning) {
       state.panning = false;
       setTool(state.tool);
     }
     if (state.dragging) {
-      const primary = state.dragging.primaryIds || state.dragging.ids;
-      reparentAfterDrag(primary);
+      const drag = state.dragging;
+      const primary = drag.primaryIds || drag.ids;
       state.dragging = null;
+      if (drag.moved) {
+        pushHistorySnapshot(drag.before); // one undo step for the whole group move
+        reparentAfterDrag(primary);
+      }
       draw();
     }
     if (state.resizing) {
-      const obj = state.objects.find((o) => o.id === state.resizing.id);
+      const rs = state.resizing;
+      const obj = state.objects.find((o) => o.id === rs.id);
       if (obj) {
         normalizeShape(obj);
         emit('object-update', obj);
+        if (rs.orig && (obj.x !== rs.orig.x || obj.y !== rs.orig.y || obj.w !== rs.orig.w || obj.h !== rs.orig.h)) {
+          pushHistorySnapshot(rs.before);
+        }
       }
       state.resizing = null;
       draw();
     }
     if (state.rotating) {
-      const obj = state.objects.find((o) => o.id === state.rotating.id);
-      if (obj) emit('object-update', obj);
+      const rt = state.rotating;
+      const obj = state.objects.find((o) => o.id === rt.id);
+      if (obj) {
+        emit('object-update', obj);
+        if ((obj.rotation || 0) !== (rt.origRotation || 0)) pushHistorySnapshot(rt.before);
+      }
       state.rotating = null;
       draw();
     }
@@ -4517,6 +5364,7 @@
         if (obj.type === 'task') { obj.w = 120; obj.h = 70; }
         if (obj.type === 'cardLink') { obj.w = 160; obj.h = 100; }
         if (DB_TYPES.has(obj.type)) { obj.w = 200; obj.h = 140; }
+        if (obj.type === 'dbSchema') { obj.w = 440; obj.h = 300; }
       }
       if (obj.type === 'cardLink') {
         if (Math.abs(obj.w) < 160) obj.w = (obj.w < 0 ? -1 : 1) * 160;
@@ -4531,6 +5379,7 @@
       pushHistory();
       state.objects.push(obj);
       emit('object-add', obj);
+      if (obj.type === 'dbSchema') adoptChildrenIntoSchema(obj);
       state.selectedIds = new Set([obj.id]);
       syncColorTargetFromSelection();
       setTool('select');
@@ -4542,6 +5391,7 @@
   });
 
   canvasWrap.addEventListener('pointercancel', () => {
+    state.rightClick = null;
     finishMarqueeIfAny();
     if (state.panning) {
       state.panning = false;
@@ -5050,7 +5900,7 @@
       : '';
     el.innerHTML = `
       <div class="chat-msg-meta">
-        <span class="chat-msg-name" style="color:${msg.color || '#93c5fd'}">${escapeHtml(msg.name)}</span>
+        <span class="chat-msg-name" style="color:${escapeHtml(msg.color || '#93c5fd')}">${escapeHtml(msg.name || 'Гость')}</span>
         <span class="chat-msg-time">${formatTime(msg.ts)}</span>
         ${receipt}
       </div>
@@ -5077,7 +5927,11 @@
 
   function renderChat() {
     chatMessages.innerHTML = '';
-    for (const msg of state.messages) appendChatMessage(msg, false);
+    if (!Array.isArray(state.messages)) state.messages = [];
+    for (const msg of state.messages) {
+      if (!msg || typeof msg !== 'object') continue; // tolerate hand-edited files
+      try { appendChatMessage(msg, false); } catch (err) { console.warn('chat message skipped', msg, err); }
+    }
     chatMessages.scrollTop = chatMessages.scrollHeight;
   }
 
@@ -5390,7 +6244,8 @@
   function exportRoomData() {
     if (!state.roomId) return toast('Нет активной комнаты');
     const payload = {
-      version: 1,
+      format: 'tarkventum-room',
+      version: 2,
       exportedAt: new Date().toISOString(),
       roomId: state.roomId,
       title: state.roomId,
@@ -5415,34 +6270,103 @@
     toast('Экспорт сохранён');
   }
 
+  /**
+   * Import an exported room JSON. The merge happens on the server ('room-import'),
+   * which validates everything, remaps colliding ids, restores chat messages and
+   * kanban cards (union, nothing is wiped) and then refreshes every client.
+   */
+  let pendingImport = null;
+
+  function countImportMessages(data) {
+    for (const k of ['messages', 'chat', 'chatMessages', 'roomMessages']) {
+      if (Array.isArray(data[k])) return data[k].length;
+      if (data[k] && Array.isArray(data[k].messages)) return data[k].messages.length;
+    }
+    return 0;
+  }
+
   function importRoomData(file) {
     if (!file || !state.roomId) return toast('Откройте комнату для импорта');
+    if (file.size > 24 * 1024 * 1024) return toast('Файл слишком большой (макс. 24 МБ)');
     const reader = new FileReader();
+    reader.onerror = () => toast('Не удалось прочитать файл');
     reader.onload = () => {
+      let data;
       try {
-        const data = JSON.parse(String(reader.result || ''));
-        if (!data || !Array.isArray(data.objects)) throw new Error('bad');
-        if (!confirm('Импортировать объекты в текущую комнату? Существующие объекты останутся.')) return;
-        for (const obj of data.objects) {
-          if (!obj || !obj.id) continue;
-          if (state.objects.find((o) => o.id === obj.id)) obj.id = uid('obj');
-          state.objects.push(obj);
-          emit('object-add', obj);
-        }
-        for (const conn of (data.connectors || [])) {
-          if (!conn || !conn.id) continue;
-          if (state.connectors.find((c) => c.id === conn.id)) conn.id = uid('conn');
-          state.connectors.push(conn);
-          emit('connector-add', conn);
-        }
-        draw();
-        toast('Импорт выполнен');
-      } catch {
-        toast('Не удалось прочитать файл экспорта');
+        let raw = String(reader.result || '');
+        if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1);
+        data = JSON.parse(raw);
+      } catch (err) {
+        toast('Это не корректный JSON: ' + ((err && err.message) || '').slice(0, 80));
+        return;
       }
+      if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        toast('Файл не похож на экспорт комнаты');
+        return;
+      }
+      const nObj = Array.isArray(data.objects) ? data.objects.length : 0;
+      const nConn = Array.isArray(data.connectors) ? data.connectors.length : 0;
+      const nMsg = countImportMessages(data);
+      const nCards = Array.isArray(data.cards) ? data.cards.length : 0;
+      if (!nObj && !nConn && !nMsg && !nCards) {
+        toast('В файле нет объектов, сообщений или карточек');
+        return;
+      }
+      pendingImport = data;
+      const modal = $('#modal-import-room');
+      const summary = $('#import-room-summary');
+      if (summary) {
+        summary.textContent = `В файле: фигур ${nObj}, стрелок ${nConn}, сообщений чата ${nMsg}, карточек канбана ${nCards}.`
+          + (data.roomId && data.roomId !== state.roomId ? ` (экспорт из комнаты «${data.roomId}»)` : '');
+      }
+      const replaceBtn = $('#import-room-replace');
+      if (replaceBtn) replaceBtn.disabled = !Array.isArray(data.objects);
+      if (modal) modal.classList.remove('hidden');
+      else runRoomImport('merge');
     };
     reader.readAsText(file);
   }
+
+  function closeImportModal() {
+    const modal = $('#modal-import-room');
+    if (modal) modal.classList.add('hidden');
+  }
+
+  function runRoomImport(mode) {
+    const data = pendingImport;
+    pendingImport = null;
+    closeImportModal();
+    if (!data || !state.socket) return;
+    if (!state.socket.connected) {
+      toast('Нет соединения с сервером — импорт отменён');
+      return;
+    }
+    pushHistory();
+    let done = false;
+    const timer = setTimeout(() => {
+      if (!done) toast('Сервер не ответил на импорт. Проверьте, что он запущен.');
+    }, 20000);
+    toast('Импорт…');
+    state.socket.emit('room-import', { data, mode }, (res) => {
+      done = true;
+      clearTimeout(timer);
+      if (!res || !res.ok) {
+        toast((res && res.error) || 'Импорт не удался');
+        return;
+      }
+      const s = res.summary || {};
+      toast(`Импорт: фигур ${s.objects || 0}, стрелок ${s.connectors || 0}, сообщений ${s.messages || 0}`
+        + (s.cards ? `, карточек ${s.cards}` : '')
+        + (s.skipped ? ` (пропущено повреждённых: ${s.skipped})` : ''));
+    });
+  }
+
+  $('#import-room-merge')?.addEventListener('click', () => runRoomImport('merge'));
+  $('#import-room-replace')?.addEventListener('click', () => {
+    if (!confirm('Заменить все фигуры и стрелки на холсте содержимым файла? (Можно отменить через Ctrl+Z)')) return;
+    runRoomImport('replace');
+  });
+  $('#import-room-cancel')?.addEventListener('click', () => { pendingImport = null; closeImportModal(); });
 
   // ---------- Public rooms list ----------
 
