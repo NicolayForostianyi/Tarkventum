@@ -7,7 +7,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
 const PORT = process.env.PORT || 3000;
-const MAX_CHAT = 100;
+const MAX_CHAT = 500;
 const MAX_DM_THREAD = 500;
 const JWT_SECRET = process.env.JWT_SECRET || 'tarkventum-dev-secret-change-me';
 const JWT_EXPIRES = process.env.JWT_EXPIRES || '30d';
@@ -40,7 +40,9 @@ const MAX_CANVAS_IMAGE_BYTES = 3 * 1024 * 1024;
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: false } });
+// maxHttpBufferSize: room import / large pencil strokes can exceed the 1 MB default,
+// which made socket.io silently drop the connection ("app crashed").
+const io = new Server(server, { cors: { origin: false }, maxHttpBufferSize: 25 * 1024 * 1024 });
 
 app.use(express.json({ limit: '4mb' }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
@@ -94,11 +96,16 @@ function loadJson(file, fallback) {
   try {
     if (!fs.existsSync(file)) return fallback;
     const raw = fs.readFileSync(file, 'utf8');
-    return JSON.parse(raw);
+    return JSON.parse(stripBom(raw));
   } catch (err) {
     console.error('loadJson', file, err.message);
     return fallback;
   }
+}
+
+/** Windows Notepad saves UTF-8 with a BOM, which JSON.parse rejects. */
+function stripBom(s) {
+  return typeof s === 'string' && s.charCodeAt(0) === 0xfeff ? s.slice(1) : s;
 }
 
 function saveJson(file, data) {
@@ -636,33 +643,169 @@ function serializeRoom(room) {
   };
 }
 
-function hydrateRoom(data) {
-  if (!data || typeof data !== 'object') return null;
-  const id = normalizeRoomId(data.id);
+function isPlainObject(v) {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+function finiteOr(v, d) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : d;
+}
+
+/**
+ * Make an object from a file/import safe to store and render.
+ * Returns null for entries that cannot be drawn at all.
+ */
+function sanitizeBoardObject(raw) {
+  if (!isPlainObject(raw)) return null;
+  const o = { ...raw };
+  if (typeof o.id !== 'string' || !o.id) o.id = genId('obj');
+  if (typeof o.type !== 'string' || !o.type) return null;
+  if (o.type === 'pen') {
+    if (!Array.isArray(o.points)) return null;
+    o.points = o.points
+      .filter((p) => isPlainObject(p))
+      .map((p) => ({ x: finiteOr(p.x, 0), y: finiteOr(p.y, 0) }));
+    if (o.points.length < 1) return null;
+  } else if (o.type === 'line' || o.type === 'arrow') {
+    o.x1 = finiteOr(o.x1, 0); o.y1 = finiteOr(o.y1, 0);
+    o.x2 = finiteOr(o.x2, o.x1 + 100); o.y2 = finiteOr(o.y2, o.y1);
+  } else {
+    o.x = finiteOr(o.x, 0);
+    o.y = finiteOr(o.y, 0);
+    if (o.w != null) o.w = finiteOr(o.w, 100);
+    if (o.h != null) o.h = finiteOr(o.h, 60);
+  }
+  if (o.rotation != null) o.rotation = finiteOr(o.rotation, 0);
+  if (o.strokeWidth != null) o.strokeWidth = Math.max(0.5, Math.min(64, finiteOr(o.strokeWidth, 2)));
+  if (o.fontSize != null && o.fontSize !== '') o.fontSize = finiteOr(o.fontSize, 14);
+  if (o.columns != null) {
+    o.columns = Array.isArray(o.columns)
+      ? o.columns.filter(isPlainObject).map((c) => ({
+        ...c,
+        name: String(c.name == null ? '' : c.name),
+        type: String(c.type == null ? '' : c.type),
+        pk: !!c.pk,
+      }))
+      : undefined;
+  }
+  if (o.text != null && typeof o.text !== 'string') o.text = String(o.text);
+  if (o.label != null && typeof o.label !== 'string') o.label = String(o.label);
+  if (o.parentId != null && typeof o.parentId !== 'string') o.parentId = null;
+  return o;
+}
+
+function sanitizeConnector(raw) {
+  if (!isPlainObject(raw)) return null;
+  if (typeof raw.fromId !== 'string' || typeof raw.toId !== 'string') return null;
+  if (!raw.fromId || !raw.toId || raw.fromId === raw.toId) return null;
+  return {
+    ...raw,
+    id: typeof raw.id === 'string' && raw.id ? raw.id : genId('conn'),
+    type: 'connector',
+    stroke: typeof raw.stroke === 'string' ? raw.stroke : '#64748b',
+    strokeWidth: Math.max(0.5, Math.min(64, finiteOr(raw.strokeWidth, 2))),
+  };
+}
+
+/** Chat messages: accept several key names / shapes found in exports and hand-edited files. */
+function pickRawMessages(data) {
+  if (!isPlainObject(data)) return [];
+  for (const key of ['messages', 'chat', 'chatMessages', 'roomMessages']) {
+    const v = data[key];
+    if (Array.isArray(v)) return v;
+    if (isPlainObject(v) && Array.isArray(v.messages)) return v.messages;
+  }
+  return [];
+}
+
+function sanitizeMessage(raw, roomId) {
+  if (!isPlainObject(raw)) return null;
+  const text = String(raw.text == null ? (raw.message == null ? '' : raw.message) : raw.text).slice(0, 1000);
+  if (!text.trim()) return null;
+  let ts = raw.ts != null ? raw.ts : (raw.time != null ? raw.time : raw.createdAt);
+  if (typeof ts === 'string') {
+    const parsed = Date.parse(ts);
+    ts = Number.isFinite(parsed) ? parsed : Number(ts);
+  }
+  ts = finiteOr(ts, Date.now());
+  return {
+    ...raw,
+    id: typeof raw.id === 'string' && raw.id ? raw.id : genId('msg'),
+    name: String(raw.name == null ? (raw.author || raw.userName || 'Гость') : raw.name).slice(0, 48),
+    color: typeof raw.color === 'string' ? raw.color : '#93c5fd',
+    text,
+    ts,
+    roomId: roomId || raw.roomId || null,
+  };
+}
+
+function normalizeMessages(list, roomId) {
+  const seen = new Set();
+  const out = [];
+  for (const raw of Array.isArray(list) ? list : []) {
+    const m = sanitizeMessage(raw, roomId);
+    if (!m || seen.has(m.id)) continue;
+    seen.add(m.id);
+    out.push(m);
+  }
+  out.sort((a, b) => a.ts - b.ts);
+  return out.slice(-MAX_CHAT);
+}
+
+/**
+ * Build a room from saved data. Accepts both the room file format ({ id, messages, ... })
+ * and the client export format ({ roomId, messages, ... }). `fallbackId` = file name.
+ */
+function hydrateRoom(data, fallbackId) {
+  if (!isPlainObject(data)) return null;
+  const id = normalizeRoomId(data.id) || normalizeRoomId(fallbackId) || normalizeRoomId(data.roomId);
   if (!id) return null;
   const room = createRoom(id, {
     ownerId: data.ownerId || null,
     visibility: data.visibility || 'public',
-    title: data.title || '',
+    title: typeof data.title === 'string' && data.title !== data.roomId ? data.title : '',
   });
-  room.members = Array.isArray(data.members) ? data.members : [];
-  room.objects = Array.isArray(data.objects) ? data.objects : [];
-  room.connectors = Array.isArray(data.connectors) ? data.connectors : [];
-  room.columns = Array.isArray(data.columns) && data.columns.length
-    ? data.columns
+  room.members = Array.isArray(data.members) ? data.members.filter(isPlainObject) : [];
+  room.objects = (Array.isArray(data.objects) ? data.objects : []).map(sanitizeBoardObject).filter(Boolean);
+  room.connectors = (Array.isArray(data.connectors) ? data.connectors : []).map(sanitizeConnector).filter(Boolean);
+  room.columns = Array.isArray(data.columns) && data.columns.filter(isPlainObject).length
+    ? data.columns.filter(isPlainObject)
     : DEFAULT_COLUMNS.map((c) => ({ ...c }));
-  room.cards = Array.isArray(data.cards) ? data.cards : [];
-  room.messages = Array.isArray(data.messages) ? data.messages.slice(-MAX_CHAT) : [];
+  room.cards = Array.isArray(data.cards) ? data.cards.filter(isPlainObject) : [];
+  room.messages = normalizeMessages(pickRawMessages(data), id);
   room.users = new Map(); // presence is ephemeral
   return room;
 }
 
+function fileMtime(file) {
+  try { return fs.statSync(file).mtimeMs; } catch { return 0; }
+}
+
+/**
+ * Load a room file. If the file exists but cannot be parsed (e.g. a hand edit left a
+ * trailing comma), it is renamed to *.broken-<time>.bak instead of being silently
+ * overwritten with an empty room (that overwrite was a real data-loss path).
+ */
 function loadRoomFromDisk(roomId) {
   const file = roomFilePath(roomId);
   if (!file || !fs.existsSync(file)) return null;
-  const data = loadJson(file, null);
-  if (!data) return null;
-  return hydrateRoom(data);
+  let data;
+  try {
+    data = JSON.parse(stripBom(fs.readFileSync(file, 'utf8')));
+  } catch (err) {
+    const backup = `${file}.broken-${Date.now()}.bak`;
+    try { fs.renameSync(file, backup); } catch { /* ignore */ }
+    console.error(`Room file ${file} is not valid JSON (${err.message}). Moved to ${backup} — fix it and rename back to .json (with the server stopped).`);
+    return null;
+  }
+  const room = hydrateRoom(data, path.basename(file, '.json'));
+  if (!room) {
+    console.error(`Room file ${file} has no usable room data; left untouched.`);
+    return null;
+  }
+  room._diskMtime = fileMtime(file);
+  return room;
 }
 
 function saveRoomToDisk(room) {
@@ -671,9 +814,28 @@ function saveRoomToDisk(room) {
   if (!file) return;
   try {
     saveJson(file, serializeRoom(room));
+    room._diskMtime = fileMtime(file);
   } catch (err) {
     console.error('saveRoomToDisk', room.id, err.message);
   }
+}
+
+/**
+ * If nobody is in the room and its file was edited on disk after our last save,
+ * reload it so manual edits (e.g. restored chat messages) are picked up.
+ */
+function maybeReloadRoomFromDisk(id) {
+  const room = rooms.get(id);
+  if (!room || room.users.size > 0 || roomSaveTimers.has(id)) return room;
+  const file = roomFilePath(id);
+  if (!file || !fs.existsSync(file)) return room;
+  const mtime = fileMtime(file);
+  if (!room._diskMtime || mtime <= room._diskMtime + 1) return room;
+  const fresh = loadRoomFromDisk(id);
+  if (!fresh) return room;
+  console.log(`Room ${id}: file changed on disk, reloaded (${fresh.messages.length} messages).`);
+  rooms.set(id, fresh);
+  return fresh;
 }
 
 function deleteRoomFromDisk(roomId) {
@@ -729,6 +891,7 @@ function loadAllRoomsFromDisk() {
       if (room) {
         rooms.set(id, room);
         count += 1;
+        console.log(`  room ${id}: ${room.objects.length} objects, ${room.messages.length} chat messages`);
       }
     }
   } catch (err) {
@@ -744,7 +907,7 @@ function getOrCreateRoom(roomId, opts) {
     if (!rooms.has(roomId)) rooms.set(roomId, createRoom(roomId, opts || {}));
     return rooms.get(roomId);
   }
-  if (rooms.has(id)) return rooms.get(id);
+  if (rooms.has(id)) return maybeReloadRoomFromDisk(id);
   const loaded = loadRoomFromDisk(id);
   if (loaded) {
     rooms.set(id, loaded);
@@ -866,6 +1029,77 @@ function normalizeCard(card, room, fallbackColumnId) {
   };
 }
 
+/** Merge exported room data into a live room. Returns counts for the UI. */
+function importIntoRoom(room, data, mode) {
+  const summary = { objects: 0, connectors: 0, messages: 0, cards: 0, skipped: 0 };
+  const hasObjects = Array.isArray(data.objects);
+  const incomingObjs = (hasObjects ? data.objects : []).map(sanitizeBoardObject);
+  summary.skipped += incomingObjs.filter((o) => !o).length;
+  const objs = incomingObjs.filter(Boolean);
+
+  if (mode === 'replace' && hasObjects) {
+    room.objects = [];
+    room.connectors = [];
+  }
+  const taken = new Set(room.objects.map((o) => o.id));
+  const idMap = new Map();
+  for (const o of objs) {
+    const oldId = o.id;
+    let newId = oldId;
+    if (taken.has(newId) || idMap.has(oldId)) newId = genId('obj');
+    idMap.set(oldId, newId);
+    taken.add(newId);
+  }
+  for (const o of objs) {
+    const copy = { ...o, id: idMap.get(o.id) || o.id };
+    if (copy.parentId) copy.parentId = idMap.get(copy.parentId) || null;
+    room.objects.push(copy);
+    summary.objects += 1;
+  }
+  const objIds = new Set(room.objects.map((o) => o.id));
+  const connTaken = new Set(room.connectors.map((c) => c.id));
+  for (const raw of Array.isArray(data.connectors) ? data.connectors : []) {
+    const c = sanitizeConnector(raw);
+    if (!c) { summary.skipped += 1; continue; }
+    const fromId = idMap.get(c.fromId) || c.fromId;
+    const toId = idMap.get(c.toId) || c.toId;
+    if (!objIds.has(fromId) || !objIds.has(toId) || fromId === toId) { summary.skipped += 1; continue; }
+    let id = c.id;
+    if (connTaken.has(id)) id = genId('conn');
+    connTaken.add(id);
+    room.connectors.push({ ...c, id, fromId, toId });
+    summary.connectors += 1;
+  }
+  // Chat: union by id, keep order by time.
+  const incomingMsgs = normalizeMessages(pickRawMessages(data), room.id);
+  const haveMsg = new Set(room.messages.map((m) => m.id));
+  const addMsgs = incomingMsgs.filter((m) => !haveMsg.has(m.id));
+  summary.messages = addMsgs.length;
+  room.messages = normalizeMessages([...room.messages, ...addMsgs], room.id);
+  // Kanban: add columns/cards that are missing (by id).
+  if (Array.isArray(data.columns)) {
+    const haveCol = new Set(room.columns.map((c) => c.id));
+    for (const col of data.columns) {
+      if (isPlainObject(col) && col.id && !haveCol.has(col.id)) {
+        room.columns.push({ id: String(col.id), title: String(col.title || 'Колонка').slice(0, 64), order: finiteOr(col.order, room.columns.length) });
+        haveCol.add(col.id);
+      }
+    }
+  }
+  if (Array.isArray(data.cards)) {
+    const haveCard = new Set(room.cards.map((c) => c.id));
+    const colIds = new Set(room.columns.map((c) => c.id));
+    for (const card of data.cards) {
+      if (!isPlainObject(card) || (card.id && haveCard.has(card.id))) continue;
+      const norm = normalizeCard(card, room, colIds.has(card.columnId) ? card.columnId : room.columns[0]?.id);
+      room.cards.push(norm);
+      haveCard.add(norm.id);
+      summary.cards += 1;
+    }
+  }
+  return summary;
+}
+
 // ---------- Socket auth ----------
 io.use((socket, next) => {
   const token = socket.handshake.auth?.token || socket.handshake.query?.token;
@@ -876,6 +1110,22 @@ io.use((socket, next) => {
 });
 
 io.on('connection', (socket) => {
+  // Never let one bad payload crash the whole server: wrap every handler.
+  {
+    const rawOn = socket.on.bind(socket);
+    socket.on = (event, handler) => rawOn(event, (...args) => {
+      try {
+        return handler(...args);
+      } catch (err) {
+        console.error(`socket handler "${event}" failed:`, err);
+        const ack = args[args.length - 1];
+        if (typeof ack === 'function') {
+          try { ack({ ok: false, error: 'Ошибка сервера' }); } catch { /* ignore */ }
+        }
+        return undefined;
+      }
+    });
+  }
   let currentRoom = null;
   let userId = null; // presence id in room (= socket.id)
   const account = socket.account;
@@ -916,6 +1166,7 @@ io.on('connection', (socket) => {
         return;
       }
       const displayName = (account.displayName || account.username).slice(0, 32);
+      if (rooms.has(id)) maybeReloadRoomFromDisk(id);
       const exists = rooms.has(id);
       const wantPrivate = visibility === 'private';
       if (!exists && (create || wantPrivate || visibility === 'public')) {
@@ -1188,9 +1439,46 @@ io.on('connection', (socket) => {
     if (!currentRoom || !obj || !obj.id) return;
     const room = rooms.get(currentRoom);
     if (!room) return;
-    room.objects.push(obj);
+    const idx = room.objects.findIndex((o) => o.id === obj.id);
+    if (idx >= 0) room.objects[idx] = obj; // re-add (undo/redo) must not duplicate
+    else room.objects.push(obj);
     scheduleRoomSave(currentRoom);
     socket.to(currentRoom).emit('object-add', obj);
+  });
+
+  // Z-order: full list of object ids in back-to-front order.
+  socket.on('objects-reorder', ({ ids } = {}) => {
+    if (!currentRoom || !Array.isArray(ids)) return;
+    const room = rooms.get(currentRoom);
+    if (!room) return;
+    const pos = new Map();
+    ids.forEach((id, i) => { if (typeof id === 'string' && !pos.has(id)) pos.set(id, i); });
+    const known = room.objects.filter((o) => pos.has(o.id)).sort((a, b) => pos.get(a.id) - pos.get(b.id));
+    const unknown = room.objects.filter((o) => !pos.has(o.id));
+    room.objects = [...known, ...unknown];
+    scheduleRoomSave(currentRoom);
+    socket.to(currentRoom).emit('objects-reorder', { ids: room.objects.map((o) => o.id) });
+  });
+
+  // Room import (from an exported JSON). mode: 'merge' (add) | 'replace' (canvas only).
+  // Chat messages and kanban cards are always merged, never wiped.
+  socket.on('room-import', ({ data, mode } = {}, ack) => {
+    const reply = (r) => { if (typeof ack === 'function') ack(r); };
+    if (!currentRoom) return reply({ ok: false, error: 'Нет активной комнаты' });
+    const room = rooms.get(currentRoom);
+    if (!room) return reply({ ok: false, error: 'Комната не найдена' });
+    if (!isPlainObject(data)) return reply({ ok: false, error: 'Файл не похож на экспорт комнаты' });
+    const summary = importIntoRoom(room, data, mode === 'replace' ? 'replace' : 'merge');
+    scheduleRoomSave(currentRoom, { immediate: true });
+    io.to(currentRoom).emit('room-state', {
+      roomId: currentRoom,
+      objects: room.objects,
+      connectors: room.connectors,
+      columns: room.columns,
+      cards: room.cards,
+      messages: room.messages,
+    });
+    reply({ ok: true, summary });
   });
 
   socket.on('object-update', (obj) => {
@@ -1637,6 +1925,11 @@ function shutdown(signal) {
   process.exit(0);
 }
 process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('uncaughtException', (err) => {
+  // Log and keep serving instead of dropping every room's live state.
+  console.error('uncaughtException', err);
+  try { flushAllRoomSaves(); } catch { /* ignore */ }
+});
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 server.listen(PORT, () => {
