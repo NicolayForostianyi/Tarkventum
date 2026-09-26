@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Tarkventum — доска и Канбан</title>
   <link rel="icon" href="/favicon.png" type="image/png" />
-  <link rel="stylesheet" href="/css/styles.css?v=20260924b" />
+  <link rel="stylesheet" href="/css/styles.css?v=20260926a" />
 </head>
 <body>
   <!-- Auth overlay -->
@@ -386,7 +386,7 @@
                 <input id="font-size-input" type="number" min="10" max="72" value="18" step="1" />
                 <button type="button" id="font-size-inc" class="palette-size-btn" aria-label="Увеличить размер">+</button>
               </div>
-              <div class="palette-size" title="Толщина пера">
+              <div class="palette-size" title="Толщина линии: фигуры, стрелки, перо (применяется к выделенным)">
                 <span class="palette-size-label">Толщина</span>
                 <button type="button" id="pen-width-dec" class="palette-size-btn" aria-label="Уменьшить толщину">−</button>
                 <input id="pen-width-input" type="number" min="1" max="32" value="2.5" step="0.5" />
@@ -509,6 +509,22 @@
     </div>
   </div>
 
+  <!-- Room import -->
+  <div id="modal-import-room" class="modal hidden">
+    <div class="modal-card">
+      <h3>Импорт комнаты</h3>
+      <p id="import-room-summary" class="hint"></p>
+      <p class="hint">«Добавить» — фигуры из файла добавятся к текущим. «Заменить холст» — текущие фигуры и стрелки будут заменены (можно отменить Ctrl+Z).
+        Сообщения чата и карточки канбана из файла добавляются в обоих случаях; существующие не удаляются.</p>
+      <div class="modal-actions">
+        <button id="import-room-cancel" class="btn" type="button">Отмена</button>
+        <div class="spacer"></div>
+        <button id="import-room-replace" class="btn" type="button">Заменить холст</button>
+        <button id="import-room-merge" class="btn primary" type="button">Добавить</button>
+      </div>
+    </div>
+  </div>
+
   <!-- DB columns editor -->
   <div id="db-columns-panel" class="db-columns-panel hidden">
     <div class="db-columns-panel-head">
@@ -521,7 +537,7 @@
     </label>
     <div class="db-columns-table-wrap">
       <table class="db-columns-table" id="db-columns-table">
-        <thead><tr><th>Колонка</th><th>Тип</th><th></th></tr></thead>
+        <thead><tr><th>Колонка</th><th>Тип</th><th title="Первичный ключ (Primary key)">PK</th><th></th></tr></thead>
         <tbody id="db-columns-body"></tbody>
       </table>
     </div>
@@ -577,6 +593,6 @@
       </div>
     </div>
 
-  <script src="/js/app.js?v=20260924b"></script>
+  <script src="/js/app.js?v=20260926a"></script>
 </body>
 </html>
